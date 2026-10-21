@@ -7,6 +7,12 @@ import (
 	"github.com/egoist/mygo"
 )
 
+const currentAppIdentifier = "com.hayami.translator"
+
+func appSecrets() mygo.SecretsModule {
+	return mygo.Secrets.Service(currentAppIdentifier)
+}
+
 // loadProviderKeys fills each provider's runtime Key from the credential
 // store. The old single-provider app stored its key as "api-key"; the
 // migrated OpenAI provider inherits that value.
@@ -28,13 +34,14 @@ func loadProviderKeys(cfg Config) Config {
 		}
 		if strings.TrimSpace(p.Key) == "" {
 			p.Key = string(legacy)
-			if err := mygo.Secrets.Set(providerSecretKey(*p), legacy); err != nil {
+			if err := appSecrets().Set(providerSecretKey(*p), legacy); err != nil {
 				return cfg
 			}
 		}
 		// The old key is no longer needed once the per-provider key is
 		// present. Removing it also means an intentionally cleared key is
 		// not silently restored on the next start.
+		_ = appSecrets().Delete(apiKeySecret)
 		_ = mygo.Secrets.Delete(apiKeySecret)
 		break
 	}
@@ -44,34 +51,41 @@ func loadProviderKeys(cfg Config) Config {
 // storedSecret reads a secret from the renamed app's service and copies it
 // from the old service on first use, so existing API keys survive the rename.
 func storedSecret(key string) ([]byte, error) {
-	v, err := mygo.Secrets.Get(key)
+	store := appSecrets()
+	v, err := store.Get(key)
 	if err == nil {
 		return v, nil
 	}
 	if !errors.Is(err, mygo.ErrSecretNotFound) {
 		return nil, err
 	}
+	if defVal, defErr := mygo.Secrets.Get(key); defErr == nil {
+		_ = store.Set(key, defVal)
+		return defVal, nil
+	}
 	legacy := mygo.Secrets.Service(legacyAppIdentifier)
 	v, err = legacy.Get(key)
 	if err != nil {
 		return nil, err
 	}
-	if err := mygo.Secrets.Set(key, v); err == nil {
+	if err := store.Set(key, v); err == nil {
 		_ = legacy.Delete(key)
 	}
 	return v, nil
 }
 
 func saveProviderKeys(cfg Config) error {
+	store := appSecrets()
 	for _, p := range cfg.Providers {
 		key := strings.TrimSpace(p.Key)
 		if key == "" {
-			if err := mygo.Secrets.Delete(providerSecretKey(p)); err != nil && !errors.Is(err, mygo.ErrSecretNotFound) {
+			if err := store.Delete(providerSecretKey(p)); err != nil && !errors.Is(err, mygo.ErrSecretNotFound) {
 				return err
 			}
+			_ = mygo.Secrets.Delete(providerSecretKey(p))
 			continue
 		}
-		if err := mygo.Secrets.Set(providerSecretKey(p), []byte(key)); err != nil {
+		if err := store.Set(providerSecretKey(p), []byte(key)); err != nil {
 			return err
 		}
 	}
@@ -79,5 +93,6 @@ func saveProviderKeys(cfg Config) error {
 }
 
 func deleteProviderKey(p Provider) {
+	_ = appSecrets().Delete(providerSecretKey(p))
 	_ = mygo.Secrets.Delete(providerSecretKey(p))
 }

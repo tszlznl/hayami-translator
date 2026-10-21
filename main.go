@@ -5,6 +5,9 @@ import (
 	_ "embed"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -86,27 +89,65 @@ type app struct {
 }
 
 func main() {
+	appData := os.Getenv("APPDATA")
+	if appData != "" {
+		logDir := filepath.Join(appData, "Hayami Translator")
+		_ = os.MkdirAll(logDir, 0o755)
+		f, err := os.OpenFile(filepath.Join(logDir, "debug.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err == nil {
+			log.SetOutput(f)
+			defer f.Close()
+		}
+	}
+	log.Println("[debug] entering main()")
+
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[debug] PANIC in main: %v\n%s", r, debug.Stack())
+		}
+	}()
+
 	if !mygo.App.RequestSingleInstanceLock() {
+		log.Println("[debug] single instance lock refused, exiting")
 		return
 	}
+	log.Println("[debug] single instance lock acquired")
 	mygo.App.SetName("Hayami Translator")
 	a := &app{}
 	mygo.App.OnWindowAllClosed(func() {}) // a tray app: closing a window does not quit
-	mygo.App.OnSecondInstance(func([]string, string) { a.showPopupAtCursor() })
+	mygo.App.OnSecondInstance(func([]string, string) {
+		log.Println("[debug] OnSecondInstance received")
+		if !hasConfiguredProvider(a.cfg) {
+			a.showSettings()
+		} else {
+			a.showCenterPopup(true)
+		}
+	})
 	mygo.App.WhenReady(a.ready)
+	log.Println("[debug] calling mygo.App.Run()")
 	if err := mygo.App.Run(); err != nil {
+		log.Println("[debug] App.Run returned error:", err)
 		log.Fatal(err)
 	}
+	log.Println("[debug] main() finished cleanly")
 }
 
 func (a *app) ready() {
+	log.Println("[debug] ready() started")
 	migrateUserData()
+	log.Println("[debug] migrateUserData() done")
 	migrateLegacyStartup()
+	log.Println("[debug] migrateLegacyStartup() done")
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Print("loading config: ", err)
 	}
+	log.Printf("[debug] loadConfig() done, providers=%d", len(cfg.Providers))
 	a.cfg = loadProviderKeys(cfg)
+	for _, p := range a.cfg.Providers {
+		log.Printf("[debug] provider %s (%s): enabled=%v, keyLen=%d, configured=%v",
+			p.ID, p.Kind, p.Enabled, len(p.Key), providerConfigured(p, p.Key))
+	}
 	a.form = a.cfg.clone()
 	a.providerName = activeProviderLabel(a.cfg)
 	a.targetLang = a.cfg.TargetLang
@@ -120,8 +161,10 @@ func (a *app) ready() {
 		log.Print("opening history: ", err)
 		a.histStatus = "历史数据库不可用：" + err.Error()
 	}
+	log.Println("[debug] openHistory() done")
 
 	a.createWindows()
+	log.Println("[debug] createWindows() done")
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
 		a.quitting = true
 	})
@@ -138,27 +181,34 @@ func (a *app) ready() {
 		a.store.close()
 	})
 	a.registerHotkeys()
+	log.Printf("[debug] registerHotkeys() done, hotkeys=%v, hotkeyErr=%q", a.hotkeys, a.hotkeyErr)
 	a.setUpTray()
+	log.Printf("[debug] setUpTray() done, tray=%v", a.tray != nil)
 	setSelectionToolbarEnabled(a.toolbarEnabled)
 	if err := startSelectionHook(a); err != nil {
 		log.Print("starting selection toolbar hook: ", err)
 	}
+	log.Println("[debug] startSelectionHook() done")
 
-	if !hasConfiguredProvider(a.cfg) {
+	configured := hasConfiguredProvider(a.cfg)
+	openedAtLogin := mygo.App.WasOpenedAtLogin()
+	log.Printf("[debug] configured=%v, openedAtLogin=%v", configured, openedAtLogin)
+	if !configured {
+		log.Println("[debug] showing settings because no configured provider")
 		a.showSettings()
-	} else if !mygo.App.WasOpenedAtLogin() {
-		a.showPopupAtCursor()
+	} else if !openedAtLogin {
+		log.Println("[debug] showing centered popup on launch")
+		a.showCenterPopup(true)
 	}
+	log.Println("[debug] ready() finished")
 }
 
 func (a *app) createWindows() {
 	a.popup = mygo.NewWindow(mygo.WindowOptions{
 		Title:         "Hayami Translator",
-		Panel:         true,
 		Hidden:        true,
 		Frameless:     true,
 		AlwaysOnTop:   true,
-		SkipTaskbar:   true,
 		DisableResize: true,
 		Width:         580,
 		Height:        520,
@@ -169,8 +219,12 @@ func (a *app) createWindows() {
 	a.popup.OnClose(func(e *mygo.CloseEvent) {
 		a.handleWindowClose(e, a.popup.Hide)
 	})
-	a.popup.OnFocus(func() { a.popupHadFocus = true })
+	a.popup.OnFocus(func() {
+		log.Println("[debug] popup.OnFocus()")
+		a.popupHadFocus = true
+	})
 	a.popup.OnBlur(func() {
+		log.Printf("[debug] popup.OnBlur(), popupHadFocus=%v, popupPinned=%v", a.popupHadFocus, a.popupPinned)
 		// A panel that could not take the foreground (for example when a
 		// second instance asks for it) gets a blur without a focus first.
 		// Keep it visible so the user can click it instead of losing it.
@@ -240,13 +294,27 @@ func (a *app) handleWindowClose(e *mygo.CloseEvent, hide func()) {
 	}
 }
 
+// showCenterPopup places the window in the center of the display and optionally pins it.
+func (a *app) showCenterPopup(pinned bool) {
+	if a.popup == nil {
+		return
+	}
+	a.popup.Center()
+	if pinned {
+		a.popupPinned = true
+	}
+	a.showPopup()
+}
+
 // showPopupAtCursor places the panel next to the pointer, inside the work
 // area of the display the pointer is on.
 func (a *app) showPopupAtCursor() {
 	if a.popup == nil {
+		log.Println("[debug] showPopupAtCursor: a.popup is nil!")
 		return
 	}
 	p := mygo.Screen.CursorScreenPoint()
+	log.Printf("[debug] showPopupAtCursor at %v", p)
 	a.placePopup(p)
 	a.showPopup()
 }
@@ -256,8 +324,10 @@ func (a *app) showPopupAtCursor() {
 // panel stays visible but inactive until it is clicked.
 func (a *app) showPopup() {
 	a.popupHadFocus = a.popup.IsFocused()
+	log.Printf("[debug] showPopup: isFocused before show=%v", a.popupHadFocus)
 	a.popup.Show()
 	a.popup.Focus()
+	log.Printf("[debug] showPopup: isVisible after show=%v", a.popup.IsVisible())
 }
 
 func (a *app) hidePopup() {
@@ -291,12 +361,14 @@ func (a *app) showSettings() {
 	a.toolbarEnabled = !a.cfg.DisableSelectionToolbar
 	a.openAtLogin = mygo.App.OpenAtLogin()
 	a.providerDeleteArmed = ""
+	a.settings.Center()
 	a.settings.Show()
 	a.settings.Focus()
 }
 
 func (a *app) showHistory() {
 	a.clearArmed = false
+	a.historyWin.Center()
 	a.historyWin.Show()
 	a.historyWin.Focus()
 	a.reloadHistory()
@@ -333,8 +405,15 @@ func (a *app) setUpTray() {
 		log.Print("no tray icon: ", err)
 		return
 	}
+	log.Println("[debug] mygo.NewTray succeeded")
 	a.tray = tray
 	a.refreshTrayMenu()
+	if !mygo.App.WasOpenedAtLogin() {
+		_ = mygo.NewNotification(mygo.NotificationOptions{
+			Title: "Hayami Translator",
+			Body:  "已在后台就绪：按 Alt+Shift+D 选区翻译，或双击图标呼出窗口",
+		}).Show()
+	}
 }
 
 // refreshTrayMenu rebuilds the menu after a setting changes. Creating another
@@ -350,7 +429,7 @@ func (a *app) refreshTrayMenu() {
 	a.tray.SetMenu(mygo.NewMenu([]*mygo.MenuItem{
 		{Label: header, Disabled: true},
 		mygo.Separator(),
-		{Label: "显示翻译窗口", Click: func(*mygo.MenuItem, *mygo.Window) { a.showPopupAtCursor() }},
+		{Label: "显示翻译窗口", Click: func(*mygo.MenuItem, *mygo.Window) { a.showCenterPopup(true) }},
 		{Label: "翻译选中文本", Accelerator: a.cfg.Hotkey, Click: func(*mygo.MenuItem, *mygo.Window) { a.translateSelection() }},
 		{Label: "截图翻译", Accelerator: a.cfg.ScreenshotHotkey, Click: func(*mygo.MenuItem, *mygo.Window) { a.translateScreenshot() }},
 		mygo.Separator(),
@@ -411,16 +490,19 @@ func (a *app) translateSelection() {
 			a.source = text
 			a.hasImage = false
 			a.shot = nil
-			a.placePopup(p)
-			a.showPopup()
 			switch {
 			case err != nil:
+				a.placePopup(p)
+				a.showPopup()
 				a.status = err.Error()
 				a.focusInput = true
 			case strings.TrimSpace(text) == "":
-				a.status = "没有读到选中文本，直接输入后点翻译"
+				a.showCenterPopup(true)
+				a.status = "输入文本后按 Ctrl+Enter 翻译"
 				a.focusInput = true
 			default:
+				a.placePopup(p)
+				a.showPopup()
 				a.startTranslation()
 			}
 		})
