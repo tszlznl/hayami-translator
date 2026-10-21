@@ -1,3 +1,32 @@
+# Build and packaging artifacts
 /build/
 /.mygo/
 mygo_windows_*.syso
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries and profiles
+*.test
+*.out
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating system files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Environment and logs
+*.log
+.env
+.env.*.local
