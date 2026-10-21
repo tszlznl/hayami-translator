@@ -51,6 +51,7 @@ type app struct {
 	result        string
 	results       []providerResult
 	multiEngine   bool
+	quitting      bool
 	errText       string
 	status        string
 	streaming     bool
@@ -119,6 +120,9 @@ func (a *app) ready() {
 	}
 
 	a.createWindows()
+	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
+		a.quitting = true
+	})
 	a.registerHotkeys()
 	a.setUpTray()
 	setSelectionToolbarEnabled(a.toolbarEnabled)
@@ -149,6 +153,9 @@ func (a *app) createWindows() {
 		Content:       ui.View(a.popupView),
 	})
 	a.popup.OnClose(func(e *mygo.CloseEvent) {
+		if a.quitting {
+			return
+		}
 		e.PreventDefault()
 		a.popup.Hide()
 	})
@@ -175,6 +182,9 @@ func (a *app) createWindows() {
 		Content:   ui.View(a.settingsView),
 	})
 	a.settings.OnClose(func(e *mygo.CloseEvent) {
+		if a.quitting {
+			return
+		}
 		e.PreventDefault()
 		a.settings.Hide()
 	})
@@ -189,6 +199,9 @@ func (a *app) createWindows() {
 		Content:   ui.View(a.historyView),
 	})
 	a.historyWin.OnClose(func(e *mygo.CloseEvent) {
+		if a.quitting {
+			return
+		}
 		e.PreventDefault()
 		a.historyWin.Hide()
 	})
@@ -204,6 +217,9 @@ func (a *app) createWindows() {
 		Content:       ui.View(a.toolbarView),
 	})
 	a.toolbar.OnClose(func(e *mygo.CloseEvent) {
+		if a.quitting {
+			return
+		}
 		e.PreventDefault()
 		a.hideSelectionToolbar()
 	})
@@ -366,8 +382,13 @@ func (a *app) refreshTrayMenu() {
 				a.refreshSettingsWindow()
 			}},
 		mygo.Separator(),
-		{Role: mygo.RoleQuit, Label: "退出 Hayami"},
+		{Role: mygo.RoleQuit, Label: "退出 Hayami", Click: func(*mygo.MenuItem, *mygo.Window) { a.quit() }},
 	}))
+}
+
+func (a *app) quit() {
+	a.quitting = true
+	mygo.App.Quit()
 }
 
 // translateSelection reads the selection of the foreground window before

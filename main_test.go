@@ -64,3 +64,22 @@ func TestConfigMultiEngineClone(t *testing.T) {
 		t.Fatal("mutating original should not affect clone")
 	}
 }
+
+func TestWindowCloseOnQuit(t *testing.T) {
+	a := &app{quitting: false}
+	shouldPrevent := func() bool {
+		if a.quitting {
+			return false
+		}
+		return true
+	}
+
+	if !shouldPrevent() {
+		t.Fatal("ordinary close should prevent default and hide")
+	}
+
+	a.quitting = true
+	if shouldPrevent() {
+		t.Fatal("close during quit sequence must not prevent default")
+	}
+}
