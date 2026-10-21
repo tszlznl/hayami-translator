@@ -1,0 +1,718 @@
+package main
+
+import (
+	"context"
+	_ "embed"
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/ui"
+	"github.com/egoist/mygo/ui/markdown"
+)
+
+type app struct {
+	cfg          Config
+	providerName string
+	store        *historyStore
+
+	popup      *mygo.Window
+	settings   *mygo.Window
+	historyWin *mygo.Window
+	toolbar    *mygo.Window
+	tray       *mygo.Tray
+	hotkeys    []string
+	hotkeyErr  string
+
+	// Drag-selection toolbar. The hook captures the text before the panel is
+	// shown; clicking the panel would otherwise move the foreground and make
+	// a second Ctrl+C target the panel itself.
+	toolbarText     string
+	toolbarPoint    mygo.Point
+	toolbarHadFocus bool
+	toolbarShowID   int
+	toolbarEnabled  bool
+
+	// Translation shown by the popup.
+	source        string
+	result        string
+	errText       string
+	status        string
+	streaming     bool
+	hasImage      bool
+	shot          []byte
+	targetLang    string
+	reqID         int
+	cancel        context.CancelFunc
+	md            markdown.Options
+	popupScroll   ui.ScrollState
+	focusInput    bool
+	popupHadFocus bool
+	popupPinned   bool
+	inputHandle   ui.Handle
+
+	// Settings window. form is a draft; the running config changes only when
+	// Save is pressed.
+	form                Config
+	openAtLogin         bool
+	settingsStatus      string
+	providerDeleteArmed string
+
+	// History window.
+	hist        []historyEntry
+	histQuery   string
+	histStatus  string
+	histList    ui.ListState
+	historyOpen bool
+	clearArmed  bool
+}
+
+func main() {
+	if !mygo.App.RequestSingleInstanceLock() {
+		return
+	}
+	mygo.App.SetName("Hayami Translator")
+	a := &app{}
+	mygo.App.OnWindowAllClosed(func() {}) // a tray app: closing a window does not quit
+	mygo.App.OnSecondInstance(func([]string, string) { a.showPopupAtCursor() })
+	mygo.App.WhenReady(a.ready)
+	if err := mygo.App.Run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func (a *app) ready() {
+	migrateUserData()
+	migrateLegacyStartup()
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Print("loading config: ", err)
+	}
+	a.cfg = loadProviderKeys(cfg)
+	a.form = a.cfg.clone()
+	a.providerName = activeProviderLabel(a.cfg)
+	a.targetLang = a.cfg.TargetLang
+	a.toolbarEnabled = !a.cfg.DisableSelectionToolbar
+	a.openAtLogin = mygo.App.OpenAtLogin()
+	a.md = markdown.Options{Theme: &markdown.Theme{FontSize: 14}}
+
+	a.store, err = openHistory()
+	if err != nil {
+		log.Print("opening history: ", err)
+		a.histStatus = "历史数据库不可用：" + err.Error()
+	}
+
+	a.createWindows()
+	a.registerHotkeys()
+	a.setUpTray()
+	setSelectionToolbarEnabled(a.toolbarEnabled)
+	if err := startSelectionHook(a); err != nil {
+		log.Print("starting selection toolbar hook: ", err)
+	}
+
+	if !hasConfiguredProvider(a.cfg) {
+		a.showSettings()
+	} else if !mygo.App.WasOpenedAtLogin() {
+		a.showPopupAtCursor()
+	}
+}
+
+func (a *app) createWindows() {
+	a.popup = mygo.NewWindow(mygo.WindowOptions{
+		Title:         "Hayami Translator",
+		Panel:         true,
+		Hidden:        true,
+		Frameless:     true,
+		AlwaysOnTop:   true,
+		SkipTaskbar:   true,
+		DisableResize: true,
+		Width:         580,
+		Height:        480,
+		MinWidth:      420,
+		MinHeight:     320,
+		Content:       ui.View(a.popupView),
+	})
+	a.popup.OnClose(func(e *mygo.CloseEvent) {
+		e.PreventDefault()
+		a.popup.Hide()
+	})
+	a.popup.OnFocus(func() { a.popupHadFocus = true })
+	a.popup.OnBlur(func() {
+		// A panel that could not take the foreground (for example when a
+		// second instance asks for it) gets a blur without a focus first.
+		// Keep it visible so the user can click it instead of losing it.
+		if a.popupHadFocus {
+			a.popupHadFocus = false
+			if !a.popupPinned {
+				a.popup.Hide()
+			}
+		}
+	})
+
+	a.settings = mygo.NewWindow(mygo.WindowOptions{
+		Title:     "设置 · Hayami Translator",
+		Hidden:    true,
+		Width:     640,
+		Height:    720,
+		MinWidth:  520,
+		MinHeight: 520,
+		Content:   ui.View(a.settingsView),
+	})
+	a.settings.OnClose(func(e *mygo.CloseEvent) {
+		e.PreventDefault()
+		a.settings.Hide()
+	})
+
+	a.historyWin = mygo.NewWindow(mygo.WindowOptions{
+		Title:     "历史记录 · Hayami Translator",
+		Hidden:    true,
+		Width:     720,
+		Height:    620,
+		MinWidth:  480,
+		MinHeight: 360,
+		Content:   ui.View(a.historyView),
+	})
+	a.historyWin.OnClose(func(e *mygo.CloseEvent) {
+		e.PreventDefault()
+		a.historyWin.Hide()
+	})
+
+	a.toolbar = mygo.NewWindow(mygo.WindowOptions{
+		Title:         "划词助手",
+		Panel:         true,
+		Hidden:        true,
+		Frameless:     true,
+		DisableResize: true,
+		Width:         178,
+		Height:        40,
+		Content:       ui.View(a.toolbarView),
+	})
+	a.toolbar.OnClose(func(e *mygo.CloseEvent) {
+		e.PreventDefault()
+		a.hideSelectionToolbar()
+	})
+	a.toolbar.OnFocus(func() { a.toolbarHadFocus = true })
+	a.toolbar.OnBlur(func() {
+		if a.toolbarHadFocus {
+			a.toolbarHadFocus = false
+			a.hideSelectionToolbar()
+		}
+	})
+}
+
+// showPopupAtCursor places the panel next to the pointer, inside the work
+// area of the display the pointer is on.
+func (a *app) showPopupAtCursor() {
+	if a.popup == nil {
+		return
+	}
+	p := mygo.Screen.CursorScreenPoint()
+	a.placePopup(p)
+	a.showPopup()
+}
+
+// showPopup shows the panel and asks for the keyboard. Windows may refuse
+// SetForegroundWindow to a process the user is not in, in which case the
+// panel stays visible but inactive until it is clicked.
+func (a *app) showPopup() {
+	a.popupHadFocus = a.popup.IsFocused()
+	a.popup.Show()
+	a.popup.Focus()
+}
+
+func (a *app) hidePopup() {
+	a.popupHadFocus = false
+	a.popup.Hide()
+}
+
+func (a *app) placePopup(p mygo.Point) {
+	d := mygo.Screen.DisplayNearestPoint(p)
+	w, h := a.popup.Size()
+	x, y := p.X+14, p.Y+18
+	if x+w > d.WorkArea.X+d.WorkArea.Width {
+		x = p.X - w - 14
+	}
+	if y+h > d.WorkArea.Y+d.WorkArea.Height {
+		y = p.Y - h - 18
+	}
+	x = max(d.WorkArea.X, x)
+	y = max(d.WorkArea.Y, y)
+	a.popup.SetPosition(x, y)
+}
+
+func (a *app) refreshSettingsWindow() {
+	if a.settings != nil && a.settings.IsVisible() {
+		a.settings.Update(func() {})
+	}
+}
+
+func (a *app) showSettings() {
+	a.form = a.cfg.clone()
+	a.toolbarEnabled = !a.cfg.DisableSelectionToolbar
+	a.openAtLogin = mygo.App.OpenAtLogin()
+	a.providerDeleteArmed = ""
+	a.settings.Show()
+	a.settings.Focus()
+}
+
+func (a *app) showHistory() {
+	a.clearArmed = false
+	a.historyWin.Show()
+	a.historyWin.Focus()
+	a.reloadHistory()
+}
+
+func (a *app) registerHotkeys() {
+	for _, h := range a.hotkeys {
+		mygo.GlobalShortcut.Unregister(h)
+	}
+	a.hotkeys = nil
+	a.hotkeyErr = ""
+	if h := strings.TrimSpace(a.cfg.Hotkey); h != "" {
+		if err := mygo.GlobalShortcut.Register(h, a.translateSelection); err != nil {
+			a.hotkeyErr = "翻译快捷键 " + h + " 注册失败：" + err.Error()
+		} else {
+			a.hotkeys = append(a.hotkeys, h)
+		}
+	}
+	if h := strings.TrimSpace(a.cfg.ScreenshotHotkey); h != "" {
+		if err := mygo.GlobalShortcut.Register(h, a.translateScreenshot); err != nil {
+			if a.hotkeyErr != "" {
+				a.hotkeyErr += "\n"
+			}
+			a.hotkeyErr += "截图快捷键 " + h + " 注册失败：" + err.Error()
+		} else {
+			a.hotkeys = append(a.hotkeys, h)
+		}
+	}
+}
+
+func (a *app) setUpTray() {
+	tray, err := mygo.NewTray(mygo.TrayOptions{Icon: trayIcon(), ToolTip: "Hayami Translator"})
+	if err != nil {
+		log.Print("no tray icon: ", err)
+		return
+	}
+	a.tray = tray
+	a.refreshTrayMenu()
+	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		stopSelectionHook()
+		a.cancelStream()
+		tray.Destroy()
+		a.store.close()
+	})
+}
+
+// refreshTrayMenu rebuilds the menu after a setting changes. Creating another
+// tray would leave the old icon behind and register another quit handler.
+func (a *app) refreshTrayMenu() {
+	if a.tray == nil {
+		return
+	}
+	header := "Hayami Translator"
+	if v := mygo.App.Version(); v != "" {
+		header += " " + v
+	}
+	a.tray.SetMenu(mygo.NewMenu([]*mygo.MenuItem{
+		{Label: header, Disabled: true},
+		mygo.Separator(),
+		{Label: "显示翻译窗口", Click: func(*mygo.MenuItem, *mygo.Window) { a.showPopupAtCursor() }},
+		{Label: "翻译选中文本", Accelerator: a.cfg.Hotkey, Click: func(*mygo.MenuItem, *mygo.Window) { a.translateSelection() }},
+		{Label: "截图翻译", Accelerator: a.cfg.ScreenshotHotkey, Click: func(*mygo.MenuItem, *mygo.Window) { a.translateScreenshot() }},
+		mygo.Separator(),
+		{Label: "历史记录…", Click: func(*mygo.MenuItem, *mygo.Window) { a.showHistory() }},
+		{Label: "设置…", Click: func(*mygo.MenuItem, *mygo.Window) { a.showSettings() }},
+		mygo.Separator(),
+		{Label: "开机启动", Type: mygo.MenuItemCheckbox, ID: "login", Checked: mygo.App.OpenAtLogin(),
+			Click: func(it *mygo.MenuItem, _ *mygo.Window) {
+				if err := mygo.App.SetOpenAtLogin(it.Checked); err != nil {
+					log.Print("setting open at login: ", err)
+					a.refreshTrayMenu()
+					return
+				}
+				a.openAtLogin = it.Checked
+				a.refreshSettingsWindow()
+			}},
+		{Label: "划词助手", Type: mygo.MenuItemCheckbox, ID: "toolbar", Checked: a.toolbarEnabled,
+			Click: func(it *mygo.MenuItem, _ *mygo.Window) {
+				a.cfg.DisableSelectionToolbar = !it.Checked
+				if err := a.cfg.save(); err != nil {
+					log.Print("saving toolbar setting: ", err)
+					a.cfg.DisableSelectionToolbar = !a.toolbarEnabled
+					a.refreshTrayMenu()
+					return
+				}
+				a.toolbarEnabled = it.Checked
+				setSelectionToolbarEnabled(it.Checked)
+				if !it.Checked {
+					a.hideSelectionToolbar()
+				}
+				a.refreshSettingsWindow()
+			}},
+		mygo.Separator(),
+		{Role: mygo.RoleQuit, Label: "退出 Hayami"},
+	}))
+}
+
+// translateSelection reads the selection of the foreground window before
+// showing the panel: showing it first would take the selection away.
+func (a *app) translateSelection() {
+	if a.popup == nil {
+		return
+	}
+	p := mygo.Screen.CursorScreenPoint()
+	if a.popup.IsVisible() {
+		a.hidePopup()
+	}
+	go func() {
+		text, err := readSelectedText()
+		a.popup.Update(func() {
+			a.resetTranslation()
+			a.source = text
+			a.hasImage = false
+			a.shot = nil
+			a.placePopup(p)
+			a.showPopup()
+			switch {
+			case err != nil:
+				a.status = err.Error()
+				a.focusInput = true
+			case strings.TrimSpace(text) == "":
+				a.status = "没有读到选中文本，直接输入后点翻译"
+				a.focusInput = true
+			default:
+				a.startTranslation()
+			}
+		})
+	}()
+}
+
+// showTranslationAt translates text that was already read, so the drag
+// toolbar does not need to send a second Ctrl+C after it has taken focus.
+func (a *app) showTranslationAt(text string, p mygo.Point) {
+	if a.popup == nil {
+		return
+	}
+	a.resetTranslation()
+	a.source = text
+	a.hasImage = false
+	a.shot = nil
+	a.placePopup(p)
+	a.showPopup()
+	if strings.TrimSpace(text) == "" {
+		a.status = "没有读到选中文本，直接输入后点翻译"
+		a.focusInput = true
+		return
+	}
+	a.startTranslation()
+}
+
+// translateScreenshot opens the system snipping overlay and translates the
+// image it puts on the clipboard with a vision model.
+func (a *app) translateScreenshot() {
+	if a.popup != nil && a.popup.IsVisible() {
+		a.hidePopup()
+	}
+	before := clipboardSeq()
+	startSnipping()
+	go func() {
+		img := waitClipboardImage(before, 60*time.Second)
+		if img == nil {
+			return
+		}
+		p := mygo.Screen.CursorScreenPoint()
+		a.popup.Update(func() {
+			a.resetTranslation()
+			a.hasImage = true
+			a.shot = img
+			a.source = ""
+			a.placePopup(p)
+			a.showPopup()
+			a.startTranslation()
+		})
+	}()
+}
+
+func (a *app) resetTranslation() {
+	a.cancelStream()
+	a.source = ""
+	a.result = ""
+	a.errText = ""
+	a.status = ""
+	a.hasImage = false
+	a.shot = nil
+}
+
+func (a *app) cancelStream() {
+	a.reqID++
+	if a.cancel != nil {
+		a.cancel()
+		a.cancel = nil
+	}
+	a.streaming = false
+}
+
+func (a *app) startTranslation() {
+	a.cancelStream()
+	cfg := a.cfg
+	var messages []chatMessage
+	var mode, sourceText string
+
+	switch {
+	case a.hasImage && len(a.shot) > 0:
+		messages = imageMessages(cfg, a.shot)
+		mode, sourceText = "image", "[截图]"
+	default:
+		sourceText = strings.TrimSpace(a.source)
+		if sourceText == "" {
+			a.status = "请输入要翻译的文本"
+			return
+		}
+		cfg.TargetLang = effectiveTarget(cfg.TargetLang, sourceText)
+		messages = textMessages(cfg, sourceText)
+		mode = "text"
+	}
+
+	providers := cfg.enabledProviders(a.hasImage)
+	configured := providers[:0]
+	for _, p := range providers {
+		if providerConfigured(p, p.Key) {
+			configured = append(configured, p)
+		}
+	}
+	providers = configured
+	if len(providers) == 0 {
+		if a.hasImage {
+			a.errText = "截图翻译需要启用一个配置好的 OpenAI Compatible 视觉模型"
+		} else {
+			a.errText = "没有可用的翻译服务，请在设置里填写 Key"
+		}
+		a.streaming = false
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	a.cancel = cancel
+	a.reqID++
+	id := a.reqID
+	a.streaming = true
+	a.result = ""
+	a.errText = ""
+	a.status = ""
+	a.focusInput = false
+
+	go func() {
+		var pending strings.Builder
+		flush := func() {
+			if pending.Len() == 0 {
+				return
+			}
+			chunk := pending.String()
+			pending.Reset()
+			a.popup.Update(func() {
+				if a.reqID == id {
+					a.result += chunk
+				}
+			})
+		}
+		last := time.Now()
+		var lastErr error
+
+		for _, p := range providers {
+			if ctx.Err() != nil {
+				break
+			}
+			key := p.Key
+			if !providerConfigured(p, key) {
+				lastErr = fmt.Errorf("%s 未配置完整", p.Name)
+				continue
+			}
+			a.popup.Update(func() {
+				if a.reqID == id {
+					a.providerName = providerLabel(p)
+				}
+			})
+			pending.Reset()
+			emitted := false
+			err := translateWithProvider(ctx, cfg, p, key, messages, sourceText, func(delta string) {
+				emitted = true
+				pending.WriteString(delta)
+				// Repaint at most every 30ms instead of once per token.
+				if time.Since(last) >= 30*time.Millisecond {
+					flush()
+					last = time.Now()
+				}
+			})
+			flush()
+			if err == nil {
+				lastErr = nil
+				break
+			}
+			if ctx.Err() != nil {
+				lastErr = ctx.Err()
+				break
+			}
+			lastErr = err
+			if emitted {
+				// A service that already produced text is not silently
+				// replaced by another one; keep the partial result.
+				break
+			}
+			a.popup.Update(func() {
+				if a.reqID == id {
+					a.result = ""
+				}
+			})
+		}
+
+		a.popup.Update(func() {
+			if a.reqID != id {
+				return
+			}
+			a.streaming = false
+			if lastErr != nil && ctx.Err() == nil {
+				if strings.TrimSpace(a.result) == "" {
+					a.errText = lastErr.Error()
+				} else {
+					a.status = "部分失败：" + lastErr.Error()
+				}
+			}
+			result := a.result
+			if strings.TrimSpace(result) == "" {
+				return
+			}
+			entry := historyEntry{
+				CreatedAt: timeNow(),
+				Source:    sourceText,
+				Result:    result,
+				Target:    cfg.TargetLang,
+				Mode:      mode,
+			}
+			go func() {
+				if err := a.store.add(entry); err != nil {
+					log.Print("history: ", err)
+					return
+				}
+				a.refreshHistory()
+			}()
+		})
+	}()
+}
+
+func (a *app) copyResult() {
+	if strings.TrimSpace(a.result) == "" {
+		return
+	}
+	mygo.Clipboard.WriteText(a.result)
+	a.status = "已复制译文"
+}
+
+func (a *app) saveSettings() {
+	f := a.form.clone()
+	f.fillDefaults()
+	f.normalizeProviders()
+	f.BaseURL = strings.TrimSpace(f.BaseURL)
+	f.Model = strings.TrimSpace(f.Model)
+	f.Hotkey = strings.TrimSpace(f.Hotkey)
+	f.ScreenshotHotkey = strings.TrimSpace(f.ScreenshotHotkey)
+	f.DisableSelectionToolbar = !a.toolbarEnabled
+	if err := saveProviderKeys(f); err != nil {
+		a.settingsStatus = "翻译服务密钥保存失败：" + err.Error()
+		return
+	}
+	if err := f.save(); err != nil {
+		a.settingsStatus = "保存失败：" + err.Error()
+		return
+	}
+	for _, old := range a.cfg.Providers {
+		kept := false
+		for _, p := range f.Providers {
+			if p.ID == old.ID {
+				kept = true
+				break
+			}
+		}
+		if !kept {
+			deleteProviderKey(old)
+		}
+	}
+	a.cfg = f
+	a.form = f.clone()
+	a.providerDeleteArmed = ""
+	a.providerName = activeProviderLabel(f)
+	a.targetLang = f.TargetLang
+	setSelectionToolbarEnabled(a.toolbarEnabled)
+	if !a.toolbarEnabled {
+		a.hideSelectionToolbar()
+	}
+	a.registerHotkeys()
+	a.refreshTrayMenu()
+	if !hasConfiguredProvider(f) {
+		a.settingsStatus = "已保存，但没有可用的翻译服务"
+	} else if a.hotkeyErr != "" {
+		a.settingsStatus = "已保存。" + a.hotkeyErr
+	} else {
+		a.settingsStatus = "已保存"
+	}
+}
+
+func (a *app) reloadHistory() {
+	if a.store == nil {
+		return
+	}
+	q := a.histQuery
+	go func() {
+		entries, err := a.store.search(q, 200)
+		a.historyWin.Update(func() {
+			if a.histQuery != q {
+				return
+			}
+			if err != nil {
+				a.histStatus = err.Error()
+				return
+			}
+			a.hist = entries
+			if len(entries) == 0 && strings.TrimSpace(q) != "" {
+				a.histStatus = "没有匹配的记录"
+			} else {
+				a.histStatus = ""
+			}
+		})
+	}()
+}
+
+func (a *app) refreshHistory() {
+	if a.historyWin == nil || !a.historyWin.IsVisible() {
+		return
+	}
+	a.historyWin.Update(func() { a.reloadHistory() })
+}
+
+func (a *app) useHistoryEntry(e historyEntry) {
+	a.resetTranslation()
+	a.source = e.Source
+	a.result = e.Result
+	a.targetLang = e.Target
+	if a.targetLang == "" {
+		a.targetLang = a.cfg.TargetLang
+	}
+	a.hasImage = false
+	if a.historyWin != nil {
+		a.historyWin.Hide()
+	}
+	p := mygo.Screen.CursorScreenPoint()
+	a.placePopup(p)
+	a.showPopup()
+}
+
+//go:embed resources/tray.png
+var trayIconPNG []byte
+
+// trayIcon is the Hayami mascot cropped for the Windows notification area.
+func trayIcon() []byte {
+	return trayIconPNG
+}
+
+func timeNow() time.Time { return time.Now() }
