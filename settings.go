@@ -71,7 +71,7 @@ func (a *app) settingsView(c *ui.Context) {
 					for i := range a.form.Providers {
 						p := &a.form.Providers[i]
 						armed := a.providerDeleteArmed == p.ID
-						ui.Column(c).Key(p.ID).Gap(10).Padding(14).Radius(10).
+						ui.Column(c.Key(p.ID)).Gap(10).Padding(14).Radius(10).
 							Background(t.Surface).Border(1, t.Border).Children(func() {
 							ui.Row(c).Gap(8).Children(func() {
 								ui.Checkbox(c, &p.Enabled, "启用")
