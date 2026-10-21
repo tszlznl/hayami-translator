@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -90,13 +91,17 @@ func sendCtrlC() bool {
 // calls marshal to it.
 func readSelectedText() (string, error) {
 	saved, saveErr := mygo.Clipboard.Read()
+	if saveErr != nil {
+		return "", fmt.Errorf("读取当前剪贴板失败：%w", saveErr)
+	}
 	probe := fmt.Sprintf("hayami-clipboard-probe-%d", time.Now().UnixNano())
 	mygo.Clipboard.WriteText(probe)
+	defer restoreClipboard(saved)
+
 	before := clipboardSeq()
 
 	releaseModifiers()
 	if !sendCtrlC() {
-		restoreClipboard(saved, saveErr)
 		return "", fmt.Errorf("无法发送 Ctrl+C（目标窗口可能以管理员权限运行）")
 	}
 
@@ -110,7 +115,6 @@ func readSelectedText() (string, error) {
 	time.Sleep(30 * time.Millisecond)
 
 	text := mygo.Clipboard.ReadText()
-	restoreClipboard(saved, saveErr)
 	text = strings.TrimSpace(text)
 	if text == probe {
 		text = ""
@@ -118,10 +122,7 @@ func readSelectedText() (string, error) {
 	return text, nil
 }
 
-func restoreClipboard(saved transfer.Data, saveErr error) {
-	if saveErr != nil {
-		return
-	}
+func restoreClipboard(saved transfer.Data) {
 	if len(saved.Items()) == 0 {
 		mygo.Clipboard.Clear()
 		return
@@ -130,9 +131,12 @@ func restoreClipboard(saved transfer.Data, saveErr error) {
 }
 
 // waitClipboardImage waits until the clipboard changes and holds an image.
-func waitClipboardImage(before uint32, timeout time.Duration) []byte {
+func waitClipboardImage(ctx context.Context, before uint32, timeout time.Duration) []byte {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		if ctx != nil && ctx.Err() != nil {
+			return nil
+		}
 		if clipboardSeq() != before {
 			if img := mygo.Clipboard.ReadImage(); len(img) > 0 {
 				return img

@@ -36,16 +36,36 @@ func migrateUserData() {
 		return
 	}
 
-	copyIfMissing(filepath.Join(oldDir, "config.json"), filepath.Join(newDir, "config.json"))
-	if copyIfMissing(filepath.Join(oldDir, "history.db"), filepath.Join(newDir, "history.db")) {
-		for _, suffix := range []string{"-wal", "-shm", "-journal"} {
-			copyIfMissing(
-				filepath.Join(oldDir, "history.db"+suffix),
-				filepath.Join(newDir, "history.db"+suffix),
-			)
+	oldConfig := filepath.Join(oldDir, "config.json")
+	newConfig := filepath.Join(newDir, "config.json")
+	oldHistory := filepath.Join(oldDir, "history.db")
+	newHistory := filepath.Join(newDir, "history.db")
+
+	var failed bool
+	if _, err := os.Stat(oldConfig); err == nil {
+		if !copyIfMissing(oldConfig, newConfig) {
+			if info, err := os.Stat(newConfig); err != nil || info.Size() == 0 {
+				failed = true
+			}
 		}
 	}
-	_ = os.WriteFile(marker, []byte("migrated\n"), 0o600)
+	if _, err := os.Stat(oldHistory); err == nil {
+		if !copyIfMissing(oldHistory, newHistory) {
+			if info, err := os.Stat(newHistory); err != nil || info.Size() == 0 {
+				failed = true
+			}
+		} else {
+			for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+				copyIfMissing(
+					filepath.Join(oldDir, "history.db"+suffix),
+					filepath.Join(newDir, "history.db"+suffix),
+				)
+			}
+		}
+	}
+	if !failed {
+		_ = os.WriteFile(marker, []byte("migrated\n"), 0o600)
+	}
 }
 
 // copyIfMissing returns true when it created a non-empty copy. It does not

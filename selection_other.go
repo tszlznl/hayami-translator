@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -21,7 +22,7 @@ func readSelectedText() (string, error) {
 	return text, nil
 }
 
-func waitClipboardImage(before uint32, timeout time.Duration) []byte {
+func waitClipboardImage(ctx context.Context, before uint32, timeout time.Duration) []byte {
 	return nil
 }
 

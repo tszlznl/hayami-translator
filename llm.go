@@ -37,6 +37,17 @@ var httpClient = &http.Client{
 		ResponseHeaderTimeout: 90 * time.Second,
 		ForceAttemptHTTP2:     true,
 	},
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("重定向次数过多")
+		}
+		// Do not forward sensitive authorization headers across domains.
+		if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+			req.Header.Del("Authorization")
+			req.Header.Del("Ocp-Apim-Subscription-Key")
+		}
+		return nil
+	},
 }
 
 func chatEndpoint(base string) string {
@@ -155,6 +166,7 @@ func streamOpenAI(ctx context.Context, cfg Config, p Provider, apiKey string, me
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64<<10), 8<<20)
+	var seenDone bool
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, ":") {
@@ -168,6 +180,7 @@ func streamOpenAI(ctx context.Context, cfg Config, p Provider, apiKey string, me
 			continue
 		}
 		if data == "[DONE]" {
+			seenDone = true
 			return nil
 		}
 		var chunk struct {
@@ -178,6 +191,7 @@ func streamOpenAI(ctx context.Context, cfg Config, p Provider, apiKey string, me
 				Message struct {
 					Content string `json:"content"`
 				} `json:"message"`
+				FinishReason *string `json:"finish_reason"`
 			} `json:"choices"`
 			Error *struct {
 				Message string `json:"message"`
@@ -195,10 +209,19 @@ func streamOpenAI(ctx context.Context, cfg Config, p Provider, apiKey string, me
 			} else if choice.Message.Content != "" {
 				onDelta(choice.Message.Content)
 			}
+			if choice.FinishReason != nil && *choice.FinishReason != "" && *choice.FinishReason != "null" {
+				seenDone = true
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
 		return err
 	}
-	return ctx.Err()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if !seenDone {
+		return fmt.Errorf("流式传输异常中断：未收到结束标记")
+	}
+	return nil
 }

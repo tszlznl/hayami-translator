@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/egoist/mygo"
 )
 
 func TestChatEndpoint(t *testing.T) {
@@ -67,19 +69,26 @@ func TestConfigMultiEngineClone(t *testing.T) {
 
 func TestWindowCloseOnQuit(t *testing.T) {
 	a := &app{quitting: false}
-	shouldPrevent := func() bool {
-		if a.quitting {
-			return false
-		}
-		return true
-	}
+	hidden := false
+	hide := func() { hidden = true }
 
-	if !shouldPrevent() {
-		t.Fatal("ordinary close should prevent default and hide")
+	e1 := &mygo.CloseEvent{}
+	a.handleWindowClose(e1, hide)
+	if !e1.DefaultPrevented() {
+		t.Fatal("ordinary close must prevent default")
+	}
+	if !hidden {
+		t.Fatal("ordinary close must invoke hide")
 	}
 
 	a.quitting = true
-	if shouldPrevent() {
+	hidden = false
+	e2 := &mygo.CloseEvent{}
+	a.handleWindowClose(e2, hide)
+	if e2.DefaultPrevented() {
 		t.Fatal("close during quit sequence must not prevent default")
+	}
+	if hidden {
+		t.Fatal("close during quit sequence must not invoke hide")
 	}
 }

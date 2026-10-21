@@ -59,3 +59,37 @@ func TestHasAnyResult(t *testing.T) {
 		t.Fatal("multi engine with all empty results should return false")
 	}
 }
+
+func TestNormalizeProvidersKeyTrim(t *testing.T) {
+	c := Config{
+		Providers: []Provider{
+			{ID: "p1", Kind: providerOpenAI, Key: "  sk-secret-key  \n\t "},
+		},
+	}
+	c.normalizeProviders()
+	if c.Providers[0].Key != "sk-secret-key" {
+		t.Fatalf("expected key to be trimmed, got %q", c.Providers[0].Key)
+	}
+}
+
+func TestToolbarToggleSyncFormDirty(t *testing.T) {
+	cfg := defaultConfig()
+	a := &app{
+		cfg:            cfg,
+		form:           cfg.clone(),
+		toolbarEnabled: !cfg.DisableSelectionToolbar,
+	}
+	if a.settingsDirty() {
+		t.Fatal("initially clean")
+	}
+
+	// Simulating tray toggle
+	toggled := !a.toolbarEnabled
+	a.cfg.DisableSelectionToolbar = !toggled
+	a.toolbarEnabled = toggled
+	a.form.DisableSelectionToolbar = !toggled
+
+	if a.settingsDirty() {
+		t.Fatal("settings should not be dirty when tray synchronized form and cfg")
+	}
+}

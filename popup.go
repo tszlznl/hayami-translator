@@ -193,6 +193,8 @@ func (a *app) popupView(c *ui.Context) {
 										if r.Streaming {
 											ui.Spinner(c)
 											ui.Badge(c, "翻译中").Background(t.Warning.Alpha(0.12)).TextColor(t.Warning)
+										} else if r.ErrText != "" && r.Result != "" {
+											ui.Badge(c, "部分中断").Background(t.Warning.Alpha(0.12)).TextColor(t.Warning)
 										} else if r.ErrText != "" {
 											ui.Badge(c, "失败").Background(t.Danger.Alpha(0.12)).TextColor(t.Danger)
 										} else if r.Result != "" {
@@ -205,15 +207,16 @@ func (a *app) popupView(c *ui.Context) {
 											a.status = "已复制「" + r.Name + "」译文"
 										}
 									})
-									if r.ErrText != "" {
-										ui.Text(c, r.ErrText).TextColor(t.Danger).FontSize(12)
-									} else if r.Result != "" {
+									if r.Result != "" {
 										if r.Streaming {
 											markdown.Stream(c, r.Result, r.MD)
 										} else {
 											markdown.View(c, r.Result, r.MD)
 										}
-									} else if r.Streaming {
+									}
+									if r.ErrText != "" {
+										ui.Text(c, r.ErrText).TextColor(t.Danger).FontSize(12)
+									} else if r.Result == "" && r.Streaming {
 										ui.Text(c, "正在请求…").FontSize(12).TextColor(t.TextMuted)
 									}
 								})

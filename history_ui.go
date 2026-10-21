@@ -120,6 +120,7 @@ func (a *app) historyView(c *ui.Context) {
 
 func (a *app) clearHistory() {
 	a.clearArmed = false
+	a.histReqID++
 	if a.store == nil {
 		return
 	}

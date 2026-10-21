@@ -60,6 +60,7 @@ type app struct {
 	targetLang    string
 	reqID         int
 	cancel        context.CancelFunc
+	shotCancel    context.CancelFunc
 	md            markdown.Options
 	popupScroll   ui.ScrollState
 	focusInput    bool
@@ -78,6 +79,7 @@ type app struct {
 	hist        []historyEntry
 	histQuery   string
 	histStatus  string
+	histReqID   int
 	histList    ui.ListState
 	historyOpen bool
 	clearArmed  bool
@@ -123,6 +125,18 @@ func (a *app) ready() {
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
 		a.quitting = true
 	})
+	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		stopSelectionHook()
+		a.cancelStream()
+		if a.shotCancel != nil {
+			a.shotCancel()
+			a.shotCancel = nil
+		}
+		if a.tray != nil {
+			a.tray.Destroy()
+		}
+		a.store.close()
+	})
 	a.registerHotkeys()
 	a.setUpTray()
 	setSelectionToolbarEnabled(a.toolbarEnabled)
@@ -153,11 +167,7 @@ func (a *app) createWindows() {
 		Content:       ui.View(a.popupView),
 	})
 	a.popup.OnClose(func(e *mygo.CloseEvent) {
-		if a.quitting {
-			return
-		}
-		e.PreventDefault()
-		a.popup.Hide()
+		a.handleWindowClose(e, a.popup.Hide)
 	})
 	a.popup.OnFocus(func() { a.popupHadFocus = true })
 	a.popup.OnBlur(func() {
@@ -182,11 +192,7 @@ func (a *app) createWindows() {
 		Content:   ui.View(a.settingsView),
 	})
 	a.settings.OnClose(func(e *mygo.CloseEvent) {
-		if a.quitting {
-			return
-		}
-		e.PreventDefault()
-		a.settings.Hide()
+		a.handleWindowClose(e, a.settings.Hide)
 	})
 
 	a.historyWin = mygo.NewWindow(mygo.WindowOptions{
@@ -199,11 +205,7 @@ func (a *app) createWindows() {
 		Content:   ui.View(a.historyView),
 	})
 	a.historyWin.OnClose(func(e *mygo.CloseEvent) {
-		if a.quitting {
-			return
-		}
-		e.PreventDefault()
-		a.historyWin.Hide()
+		a.handleWindowClose(e, a.historyWin.Hide)
 	})
 
 	a.toolbar = mygo.NewWindow(mygo.WindowOptions{
@@ -217,11 +219,7 @@ func (a *app) createWindows() {
 		Content:       ui.View(a.toolbarView),
 	})
 	a.toolbar.OnClose(func(e *mygo.CloseEvent) {
-		if a.quitting {
-			return
-		}
-		e.PreventDefault()
-		a.hideSelectionToolbar()
+		a.handleWindowClose(e, a.hideSelectionToolbar)
 	})
 	a.toolbar.OnFocus(func() { a.toolbarHadFocus = true })
 	a.toolbar.OnBlur(func() {
@@ -230,6 +228,16 @@ func (a *app) createWindows() {
 			a.hideSelectionToolbar()
 		}
 	})
+}
+
+func (a *app) handleWindowClose(e *mygo.CloseEvent, hide func()) {
+	if a.quitting {
+		return
+	}
+	e.PreventDefault()
+	if hide != nil {
+		hide()
+	}
 }
 
 // showPopupAtCursor places the panel next to the pointer, inside the work
@@ -327,12 +335,6 @@ func (a *app) setUpTray() {
 	}
 	a.tray = tray
 	a.refreshTrayMenu()
-	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
-		stopSelectionHook()
-		a.cancelStream()
-		tray.Destroy()
-		a.store.close()
-	})
 }
 
 // refreshTrayMenu rebuilds the menu after a setting changes. Creating another
@@ -375,6 +377,7 @@ func (a *app) refreshTrayMenu() {
 					return
 				}
 				a.toolbarEnabled = it.Checked
+				a.form.DisableSelectionToolbar = !it.Checked
 				setSelectionToolbarEnabled(it.Checked)
 				if !it.Checked {
 					a.hideSelectionToolbar()
@@ -450,11 +453,18 @@ func (a *app) translateScreenshot() {
 	if a.popup != nil && a.popup.IsVisible() {
 		a.hidePopup()
 	}
+	if a.shotCancel != nil {
+		a.shotCancel()
+		a.shotCancel = nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.shotCancel = cancel
+
 	before := clipboardSeq()
 	startSnipping()
 	go func() {
-		img := waitClipboardImage(before, 60*time.Second)
-		if img == nil {
+		img := waitClipboardImage(ctx, before, 60*time.Second)
+		if img == nil || ctx.Err() != nil {
 			return
 		}
 		p := mygo.Screen.CursorScreenPoint()
@@ -519,6 +529,12 @@ func (a *app) startTranslation() {
 		}
 	}
 	providers = configured
+	a.result = ""
+	a.results = nil
+	a.errText = ""
+	a.status = ""
+	a.focusInput = false
+
 	if len(providers) == 0 {
 		if a.hasImage {
 			a.errText = "截图翻译需要启用一个配置好的 OpenAI Compatible 视觉模型"
@@ -534,10 +550,6 @@ func (a *app) startTranslation() {
 	a.reqID++
 	id := a.reqID
 	a.streaming = true
-	a.result = ""
-	a.errText = ""
-	a.status = ""
-	a.focusInput = false
 
 	if a.multiEngine {
 		a.results = make([]providerResult, len(providers))
@@ -786,12 +798,12 @@ func (a *app) saveSettings() {
 	f.Hotkey = strings.TrimSpace(f.Hotkey)
 	f.ScreenshotHotkey = strings.TrimSpace(f.ScreenshotHotkey)
 	f.DisableSelectionToolbar = !a.toolbarEnabled
-	if err := saveProviderKeys(f); err != nil {
-		a.settingsStatus = "翻译服务密钥保存失败：" + err.Error()
-		return
-	}
 	if err := f.save(); err != nil {
 		a.settingsStatus = "保存失败：" + err.Error()
+		return
+	}
+	if err := saveProviderKeys(f); err != nil {
+		a.settingsStatus = "配置已保存，但密钥写入失败：" + err.Error()
 		return
 	}
 	for _, old := range a.cfg.Providers {
@@ -831,11 +843,13 @@ func (a *app) reloadHistory() {
 	if a.store == nil {
 		return
 	}
+	a.histReqID++
+	id := a.histReqID
 	q := a.histQuery
 	go func() {
 		entries, err := a.store.search(q, 200)
 		a.historyWin.Update(func() {
-			if a.histQuery != q {
+			if a.histReqID != id || a.histQuery != q {
 				return
 			}
 			if err != nil {
@@ -867,6 +881,8 @@ func (a *app) useHistoryEntry(e historyEntry) {
 	if a.targetLang == "" {
 		a.targetLang = a.cfg.TargetLang
 	}
+	a.cfg.TargetLang = a.targetLang
+	a.form.TargetLang = a.targetLang
 	a.hasImage = false
 	if a.historyWin != nil {
 		a.historyWin.Hide()

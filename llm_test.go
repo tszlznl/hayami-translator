@@ -103,3 +103,49 @@ func TestEmptyAPIKey(t *testing.T) {
 		t.Fatalf("error %v", err)
 	}
 }
+
+func TestStreamChatPrematureClose(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"truncated\"}}]}\n\n")
+		// Close without [DONE] and without finish_reason
+	}))
+	defer srv.Close()
+
+	cfg := defaultConfig()
+	cfg.BaseURL = srv.URL
+	var out strings.Builder
+	err := streamChat(context.Background(), cfg, "k", textMessages(cfg, "hi"), func(s string) {
+		out.WriteString(s)
+	})
+	if err == nil {
+		t.Fatal("expected error on premature stream close without [DONE]")
+	}
+	if !strings.Contains(err.Error(), "未收到结束标记") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+	if out.String() != "truncated" {
+		t.Fatalf("expected partial tokens to be emitted, got %q", out.String())
+	}
+}
+
+func TestStreamChatFinishReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"full\"},\"finish_reason\":\"stop\"}]}\n\n")
+	}))
+	defer srv.Close()
+
+	cfg := defaultConfig()
+	cfg.BaseURL = srv.URL
+	var out strings.Builder
+	err := streamChat(context.Background(), cfg, "k", textMessages(cfg, "hi"), func(s string) {
+		out.WriteString(s)
+	})
+	if err != nil {
+		t.Fatalf("expected success with finish_reason: %v", err)
+	}
+	if out.String() != "full" {
+		t.Fatalf("expected full, got %q", out.String())
+	}
+}

@@ -121,6 +121,7 @@ func (c *Config) normalizeProviders() {
 			p.Endpoint = strings.TrimSpace(p.Endpoint)
 			p.AppID = strings.TrimSpace(p.AppID)
 		}
+		p.Key = strings.TrimSpace(p.Key)
 		out = append(out, p)
 	}
 	c.Providers = out
