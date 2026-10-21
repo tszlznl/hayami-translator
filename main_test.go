@@ -50,3 +50,17 @@ func TestConfigZeroTemperature(t *testing.T) {
 		t.Errorf("expected 0.3 for negative temperature, got %v", c.Temperature)
 	}
 }
+
+func TestConfigMultiEngineClone(t *testing.T) {
+	c := defaultConfig()
+	c.MultiEngine = true
+	cloned := c.clone()
+	if !cloned.MultiEngine {
+		t.Fatal("cloned config should preserve MultiEngine=true")
+	}
+
+	c.MultiEngine = false
+	if cloned.MultiEngine != true {
+		t.Fatal("mutating original should not affect clone")
+	}
+}

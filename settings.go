@@ -66,7 +66,13 @@ func (a *app) settingsView(c *ui.Context) {
 
 		ui.Scroll(c).Grow(1).Padding(18, 20).Children(func() {
 			ui.Column(c).Gap(22).Children(func() {
-				section(c, "翻译服务", "从上到下按优先级尝试；某个服务在返回内容前失败时，自动换下一个。", func() {
+				section(c, "翻译服务", "配置并管理翻译引擎。支持多引擎同时翻译对比，或按优先级自动重试。", func() {
+					card(c, func() {
+						ui.Checkbox(c, &a.form.MultiEngine, "多引擎同时翻译")
+						ui.Text(c, "开启后同时调用所有已启用的翻译服务并并列对比结果；关闭时按优先级顺序依次尝试并自动回退。").
+							FontSize(11).TextColor(t.TextMuted)
+					})
+
 					removeAt, moveFrom, moveTo := -1, -1, -1
 					for i := range a.form.Providers {
 						p := &a.form.Providers[i]

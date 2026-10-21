@@ -6,12 +6,23 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/markdown"
 )
+
+type providerResult struct {
+	ID        string
+	Name      string
+	Kind      string
+	Result    string
+	ErrText   string
+	Streaming bool
+	MD        *markdown.Options
+}
 
 type app struct {
 	cfg          Config
@@ -38,6 +49,8 @@ type app struct {
 	// Translation shown by the popup.
 	source        string
 	result        string
+	results       []providerResult
+	multiEngine   bool
 	errText       string
 	status        string
 	streaming     bool
@@ -94,6 +107,7 @@ func (a *app) ready() {
 	a.form = a.cfg.clone()
 	a.providerName = activeProviderLabel(a.cfg)
 	a.targetLang = a.cfg.TargetLang
+	a.multiEngine = a.cfg.MultiEngine
 	a.toolbarEnabled = !a.cfg.DisableSelectionToolbar
 	a.openAtLogin = mygo.App.OpenAtLogin()
 	a.md = markdown.Options{Theme: &markdown.Theme{FontSize: 14}}
@@ -129,7 +143,7 @@ func (a *app) createWindows() {
 		SkipTaskbar:   true,
 		DisableResize: true,
 		Width:         580,
-		Height:        480,
+		Height:        520,
 		MinWidth:      420,
 		MinHeight:     320,
 		Content:       ui.View(a.popupView),
@@ -439,6 +453,7 @@ func (a *app) resetTranslation() {
 	a.cancelStream()
 	a.source = ""
 	a.result = ""
+	a.results = nil
 	a.errText = ""
 	a.status = ""
 	a.hasImage = false
@@ -503,6 +518,109 @@ func (a *app) startTranslation() {
 	a.status = ""
 	a.focusInput = false
 
+	if a.multiEngine {
+		a.results = make([]providerResult, len(providers))
+		for i, p := range providers {
+			a.results[i] = providerResult{
+				ID:        p.ID,
+				Name:      p.Name,
+				Kind:      p.Kind,
+				Streaming: true,
+				MD:        &markdown.Options{Theme: &markdown.Theme{FontSize: 13}},
+			}
+		}
+
+		go func() {
+			var wg sync.WaitGroup
+			for i, p := range providers {
+				idx := i
+				prov := p
+				key := prov.Key
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					var pPending strings.Builder
+					pFlush := func() {
+						if pPending.Len() == 0 {
+							return
+						}
+						chunk := pPending.String()
+						pPending.Reset()
+						a.popup.Update(func() {
+							if a.reqID == id && idx < len(a.results) {
+								a.results[idx].Result += chunk
+							}
+						})
+					}
+					pLast := time.Now()
+					err := translateWithProvider(ctx, cfg, prov, key, messages, sourceText, func(delta string) {
+						pPending.WriteString(delta)
+						if time.Since(pLast) >= 30*time.Millisecond {
+							pFlush()
+							pLast = time.Now()
+						}
+					})
+					pFlush()
+					a.popup.Update(func() {
+						if a.reqID == id && idx < len(a.results) {
+							a.results[idx].Streaming = false
+							if err != nil && ctx.Err() == nil {
+								a.results[idx].ErrText = err.Error()
+							}
+						}
+					})
+				}()
+			}
+
+			wg.Wait()
+
+			a.popup.Update(func() {
+				if a.reqID != id {
+					return
+				}
+				a.streaming = false
+				var successCount int
+				var combined strings.Builder
+				for i := range a.results {
+					r := &a.results[i]
+					if strings.TrimSpace(r.Result) != "" {
+						successCount++
+						if combined.Len() > 0 {
+							combined.WriteString("\n\n---\n\n")
+						}
+						combined.WriteString("### " + r.Name + "\n\n" + r.Result)
+					}
+				}
+				if successCount == 0 && ctx.Err() == nil {
+					a.errText = "所有翻译服务均失败"
+				} else {
+					a.status = fmt.Sprintf("全部完成 (%d/%d 成功)", successCount, len(a.results))
+					a.result = combined.String()
+				}
+				result := a.result
+				if strings.TrimSpace(result) == "" {
+					return
+				}
+				entry := historyEntry{
+					CreatedAt: timeNow(),
+					Source:    sourceText,
+					Result:    result,
+					Target:    cfg.TargetLang,
+					Mode:      mode,
+				}
+				go func() {
+					if err := a.store.add(entry); err != nil {
+						log.Print("history: ", err)
+						return
+					}
+					a.refreshHistory()
+				}()
+			})
+		}()
+		return
+	}
+
+	a.results = nil
 	go func() {
 		var pending strings.Builder
 		flush := func() {
@@ -601,7 +719,36 @@ func (a *app) startTranslation() {
 	}()
 }
 
+func (a *app) hasAnyResult() bool {
+	if a.multiEngine && len(a.results) > 0 {
+		for i := range a.results {
+			if strings.TrimSpace(a.results[i].Result) != "" {
+				return true
+			}
+		}
+		return false
+	}
+	return strings.TrimSpace(a.result) != ""
+}
+
 func (a *app) copyResult() {
+	if a.multiEngine && len(a.results) > 0 {
+		var b strings.Builder
+		for i := range a.results {
+			r := &a.results[i]
+			if strings.TrimSpace(r.Result) != "" {
+				if b.Len() > 0 {
+					b.WriteString("\n\n---\n\n")
+				}
+				b.WriteString("【" + r.Name + "】\n" + r.Result)
+			}
+		}
+		if b.Len() > 0 {
+			mygo.Clipboard.WriteText(b.String())
+			a.status = "已复制全部引擎译文"
+		}
+		return
+	}
 	if strings.TrimSpace(a.result) == "" {
 		return
 	}
@@ -643,6 +790,7 @@ func (a *app) saveSettings() {
 	a.providerDeleteArmed = ""
 	a.providerName = activeProviderLabel(f)
 	a.targetLang = f.TargetLang
+	a.multiEngine = f.MultiEngine
 	setSelectionToolbarEnabled(a.toolbarEnabled)
 	if !a.toolbarEnabled {
 		a.hideSelectionToolbar()

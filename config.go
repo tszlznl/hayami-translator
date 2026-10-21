@@ -30,6 +30,10 @@ type Config struct {
 	// before this feature keep working.
 	DisableSelectionToolbar bool `json:"disableSelectionToolbar,omitempty"`
 
+	// MultiEngine enables concurrent translation using all enabled providers
+	// instead of trying them sequentially as fallbacks.
+	MultiEngine bool `json:"multiEngine,omitempty"`
+
 	// Providers is the translation service list in priority order. The
 	// BaseURL and Model above are kept as the legacy single-provider fields
 	// so existing configs keep working; new installs use Providers.

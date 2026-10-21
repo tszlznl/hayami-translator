@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/markdown"
 )
@@ -115,12 +116,23 @@ func (a *app) popupView(c *ui.Context) {
 					a.startTranslation()
 				}
 
-				if ui.Button(c, "复制").Disabled(strings.TrimSpace(a.result) == "").
+				if ui.Button(c, "复制").Disabled(!a.hasAnyResult()).
 					Tooltip("复制译文").Clicked() {
 					a.copyResult()
 				}
-				if a.result != "" && !a.streaming {
+				if a.hasAnyResult() && !a.streaming {
 					if ui.Button(c, "重译").Tooltip("重新翻译原文").Clicked() {
+						a.startTranslation()
+					}
+				}
+				if ui.Checkbox(c, &a.multiEngine, "多引擎").
+					Tooltip("同时调用所有已启用的翻译服务并对比结果").Changed() {
+					a.cfg.MultiEngine = a.multiEngine
+					a.form.MultiEngine = a.multiEngine
+					if err := a.cfg.save(); err != nil {
+						a.status = "设置保存失败：" + err.Error()
+					}
+					if a.hasAnyResult() && !a.streaming {
 						a.startTranslation()
 					}
 				}
@@ -134,7 +146,7 @@ func (a *app) popupView(c *ui.Context) {
 					if err := a.cfg.save(); err != nil {
 						a.status = "目标语言保存失败：" + err.Error()
 					}
-					if a.result != "" && !a.streaming {
+					if a.hasAnyResult() && !a.streaming {
 						a.startTranslation()
 					}
 				}
@@ -143,61 +155,108 @@ func (a *app) popupView(c *ui.Context) {
 			ui.Column(c).Grow(1).Radius(10).Background(t.Surface).
 				Border(1, t.Border).Children(func() {
 				ui.Row(c).Padding(10, 12).Gap(8).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, "译文").FontSize(12).Bold().TextColor(t.TextMuted)
+					title := "译文"
+					if a.multiEngine && len(a.results) > 0 {
+						title = "译文（多引擎对比）"
+					}
+					ui.Text(c, title).FontSize(12).Bold().TextColor(t.TextMuted)
 					switch {
 					case a.errText != "":
 						ui.Badge(c, "失败").Background(t.Danger.Alpha(0.12)).TextColor(t.Danger)
 					case a.streaming:
 						ui.Badge(c, "翻译中").Background(t.Warning.Alpha(0.12)).TextColor(t.Warning)
-					case a.result != "":
+					case a.hasAnyResult():
 						ui.Badge(c, "完成").Background(t.Success.Alpha(0.12)).TextColor(t.Success)
 					}
 					ui.Spacer(c)
-					if a.status != "" && a.result != "" && !a.streaming {
+					if a.status != "" && a.hasAnyResult() && !a.streaming {
 						ui.Text(c, a.status).FontSize(11).
 							TextColor(statusColor(t, a.status)).SingleLine().Tooltip(a.status)
 					}
 				})
 
-				if a.streaming {
+				if a.streaming && !a.multiEngine {
 					a.popupScroll.Y = math.MaxFloat32
 				}
 				ui.Scroll(c).Grow(1).TrackScroll(&a.popupScroll).
 					Padding(0, 12, 12, 12).Children(func() {
-					switch {
-					case a.errText != "":
-						ui.Column(c).Gap(6).Children(func() {
-							ui.Text(c, a.errText).TextColor(t.Danger)
-							ui.Text(c, "按 Ctrl+Enter 重试，或检查设置里的翻译服务。").FontSize(11).TextColor(t.TextMuted)
+					if a.multiEngine && len(a.results) > 0 {
+						ui.Column(c).Gap(10).Children(func() {
+							for i := range a.results {
+								r := &a.results[i]
+								ui.Column(c.Key(r.ID)).Gap(6).Padding(10, 12).Radius(8).
+									Background(t.Background).Border(1, t.Border).Children(func() {
+									ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+										ui.Text(c, r.Name).Bold().FontSize(12)
+										ui.Badge(c, providerKindName(r.Kind)).
+											Background(t.Surface).TextColor(t.TextMuted)
+										if r.Streaming {
+											ui.Spinner(c)
+											ui.Badge(c, "翻译中").Background(t.Warning.Alpha(0.12)).TextColor(t.Warning)
+										} else if r.ErrText != "" {
+											ui.Badge(c, "失败").Background(t.Danger.Alpha(0.12)).TextColor(t.Danger)
+										} else if r.Result != "" {
+											ui.Badge(c, "完成").Background(t.Success.Alpha(0.12)).TextColor(t.Success)
+										}
+										ui.Spacer(c)
+										if ui.Button(c, "复制").Disabled(strings.TrimSpace(r.Result) == "").
+											Tooltip("复制该服务译文").Clicked() {
+											mygo.Clipboard.WriteText(r.Result)
+											a.status = "已复制「" + r.Name + "」译文"
+										}
+									})
+									if r.ErrText != "" {
+										ui.Text(c, r.ErrText).TextColor(t.Danger).FontSize(12)
+									} else if r.Result != "" {
+										if r.Streaming {
+											markdown.Stream(c, r.Result, r.MD)
+										} else {
+											markdown.View(c, r.Result, r.MD)
+										}
+									} else if r.Streaming {
+										ui.Text(c, "正在请求…").FontSize(12).TextColor(t.TextMuted)
+									}
+								})
+							}
 						})
-					case a.result != "" && a.streaming:
-						markdown.Stream(c, a.result, &a.md)
-					case a.result != "":
-						markdown.View(c, a.result, &a.md)
-					case a.streaming:
-						ui.Row(c).Gap(8).Children(func() {
-							ui.Spinner(c)
-							ui.Text(c, "正在翻译…").TextColor(t.TextMuted)
-						})
-					default:
-						ui.Column(c).Gap(5).Padding(18, 14).AlignItems(ui.Center).Children(func() {
-							ui.Text(c, "译文将显示在这里").Bold().TextColor(t.TextMuted)
-							ui.Text(c, "输入文字后按 Ctrl+Enter，或选中文本后按 "+a.cfg.Hotkey).
-								FontSize(11).TextColor(t.TextMuted)
-						})
+					} else {
+						switch {
+						case a.errText != "":
+							ui.Column(c).Gap(6).Children(func() {
+								ui.Text(c, a.errText).TextColor(t.Danger)
+								ui.Text(c, "按 Ctrl+Enter 重试，或检查设置里的翻译服务。").FontSize(11).TextColor(t.TextMuted)
+							})
+						case a.result != "" && a.streaming:
+							markdown.Stream(c, a.result, &a.md)
+						case a.result != "":
+							markdown.View(c, a.result, &a.md)
+						case a.streaming:
+							ui.Row(c).Gap(8).Children(func() {
+								ui.Spinner(c)
+								ui.Text(c, "正在翻译…").TextColor(t.TextMuted)
+							})
+						default:
+							ui.Column(c).Gap(5).Padding(18, 14).AlignItems(ui.Center).Children(func() {
+								ui.Text(c, "译文将显示在这里").Bold().TextColor(t.TextMuted)
+								ui.Text(c, "输入文字后按 Ctrl+Enter，或选中文本后按 "+a.cfg.Hotkey).
+									FontSize(11).TextColor(t.TextMuted)
+							})
+						}
 					}
 				})
 			})
 
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 				foot := a.providerName
-				if foot == "" {
+				if a.multiEngine && len(a.results) > 0 {
+					foot = fmt.Sprintf("多引擎并发 (%d 个服务)", len(a.results))
+				} else if foot == "" {
 					foot = a.cfg.Model
 				}
 				if foot != "" {
 					ui.Badge(c, foot).Background(t.Surface).TextColor(t.TextMuted)
 				}
-				if a.status != "" && (a.result == "" || a.streaming) {
+				if a.status != "" && (!a.hasAnyResult() || a.streaming) {
 					ui.Text(c, a.status).FontSize(11).
 						TextColor(statusColor(t, a.status)).SingleLine().Tooltip(a.status)
 				}
