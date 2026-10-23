@@ -12,10 +12,16 @@
 
 ## ✨ 核心特性
 
-- 🖱️ **划词悬浮工具条**：鼠标选中文本后自动轻量浮显快捷图标，点击即刻弹出翻译，支持在设置中一键开启或关闭。
+- 🎨 **Windows 11 Fluent 原生体验**：精细还原 Win11 官方设计规范，适配浅色与深色主题，采用 Segoe UI Variable 字体、精美圆角、柔和光晕阴影与主题强调色。
+- 🖱️ **灵活的划词即译与气泡**：
+  - **显示图标**：选中文本后在光标旁轻量浮显快捷图标，点击即刻弹出翻译。
+  - **取词即译气泡**：选词即显精简释义气泡，包含音标、词性与简明释义，支持一键展开完整翻译。
+  - **直接弹出**：划选完成后就近自动展开完整翻译浮窗。
 - ⌨️ **全局快捷键呼出**：
-  - `Alt+Shift+D`：快速翻译当前选中文本；若未选中文本则在鼠标旁呼出主翻译窗口。
+  - `Ctrl+Alt+T`：快速翻译当前选中文本；若未选中文本则在光标旁呼出主翻译窗口。
+  - `Ctrl+Alt+I`：独立双栏输入翻译窗口（支持自适应双栏、源/目标语种切换与实时流式输出）。
   - `Alt+Shift+S`：区域截图快速翻译（调用系统截屏框选屏幕，使用视觉模型识别并翻译）。
+- 🔊 **Windows SAPI 语音朗读 (TTS)**：内置原生语音发音支持，支持手动点击发音、翻译完成自动朗读，并支持随时打断与重播。
 - 🤖 **多引擎翻译支持**：
   - **OpenAI 兼容协议**：支持 OpenAI (GPT-4o / GPT-4o-mini)、DeepSeek、Moonshot (Kimi)、通义千问 (Qwen)、Ollama 本地大模型及任意自定义兼容网关。
   - **Azure 翻译**：集成微软 Azure Cognitive Services 翻译服务。
@@ -39,6 +45,7 @@
   - Windows 全局低级鼠标钩子 (`WH_MOUSE_LL`) 精准监测选词划动
   - Windows 凭据管理器 (`wincred`) 安全保管 API Key
   - Windows 注册表 (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) 管理自启
+  - Windows SAPI (`System.Speech.Synthesis`) 语音朗读集成
 
 ---
 
@@ -53,11 +60,14 @@ hayami-translator/
 ├── translate_providers.go      # OpenAI / Azure / 百度翻译的具体协议实现
 ├── llm.go                      # OpenAI 兼容接口流式与非流式调用实现
 ├── language.go                 # 语种检测与中英自动互译逻辑
+├── dict.go                     # 快速取词释义与轻量内置离线词典
+├── icons.go                    # Windows 11 Fluent 线性图标与 Windows SAPI TTS
 ├── history.go                  # 历史记录内存/持久化存储实现
 ├── history_ui.go               # 翻译历史记录查看与搜索窗口
-├── settings.go                 # 设置界面（引擎增删改查、快捷键、提示词配置）
-├── popup.go                    # 翻译悬浮弹窗 UI
-├── toolbar.go                  # 鼠标划词就近浮动的迷你工具条 UI
+├── settings.go                 # Windows 11 侧边栏式设置界面
+├── popup.go                    # 翻译悬浮弹窗 UI（圆角、双模式与响应式排版）
+├── input_window.go             # 独立双栏输入翻译窗口（响应式布局）
+├── toolbar.go                  # 鼠标划词迷你悬浮按钮与取词即译气泡 UI
 ├── selection_windows.go        # Windows 剪贴板读取与文本获取实现
 ├── selection_hook_windows.go   # Windows 全局鼠标与键盘监听钩子
 ├── startup_windows.go          # Windows 开机自启注册表读写

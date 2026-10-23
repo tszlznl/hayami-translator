@@ -93,3 +93,25 @@ func TestToolbarToggleSyncFormDirty(t *testing.T) {
 		t.Fatal("settings should not be dirty when tray synchronized form and cfg")
 	}
 }
+
+func TestSettingsDirtyWithEmptyProviders(t *testing.T) {
+	cfg := Config{
+		ProvidersConfigured: true,
+		Providers:           []Provider{}, // non-nil empty slice
+	}
+	cfg.fillDefaults()
+	a := &app{
+		cfg:            cfg,
+		form:           cfg.clone(),
+		toolbarEnabled: !cfg.DisableSelectionToolbar,
+	}
+	if a.settingsDirty() {
+		t.Fatal("empty providers list should not cause settings to be marked dirty")
+	}
+
+	// Also test when one is nil and the other is empty slice
+	a.form.Providers = nil
+	if a.settingsDirty() {
+		t.Fatal("nil providers and empty slice providers should both be considered clean")
+	}
+}

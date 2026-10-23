@@ -8,15 +8,23 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
+var triggerModes = []string{
+	"显示图标，点击翻译",
+	"取词即译气泡",
+	"直接弹出完整翻译",
+}
+
 // settingsDirty reports whether the draft differs from the running config.
-// openAtLogin applies immediately, so it is not part of this check.
 func (a *app) settingsDirty() bool {
-	return !reflect.DeepEqual(a.form, a.cfg) ||
+	f, c := a.form, a.cfg
+	if len(f.Providers) == 0 && len(c.Providers) == 0 {
+		f.Providers = nil
+		c.Providers = nil
+	}
+	return !reflect.DeepEqual(f, c) ||
 		a.toolbarEnabled != !a.cfg.DisableSelectionToolbar
 }
 
-// settingsView edits the endpoint, the model, the key, the languages and the
-// shortcuts. Nothing is written until Save is pressed.
 func (a *app) addFormProvider(kind string) {
 	a.providerDeleteArmed = ""
 	a.settingsStatus = "已添加新服务，保存后生效"
@@ -40,248 +48,447 @@ func (a *app) addFormProvider(kind string) {
 	a.form.Providers = append(a.form.Providers, p)
 }
 
+// settingRow renders a responsive Windows 11 Fluent settings row (left label+desc, right control)
+func settingRow(c *ui.Context, title, desc string, control func()) {
+	t := c.Theme()
+	_, _, _, border, textPrimary, textSecondary, _, _ := win11Theme(t)
+
+	ui.Row(c).Padding(12, 16).AlignItems(ui.Center).Gap(12).
+		BorderWidth(0, 0, 1, 0).BorderColor(border).Children(func() {
+		ui.Column(c).Grow(1).Shrink(1).Gap(2).Justify(ui.Center).Children(func() {
+			ui.Text(c, title).FontSize(14).TextColor(textPrimary)
+			if desc != "" {
+				ui.Text(c, desc).FontSize(12).TextColor(textSecondary)
+			}
+		})
+		ui.Column(c).Shrink(0).Children(control)
+	})
+}
+
 func (a *app) settingsView(c *ui.Context) {
 	t := c.Theme()
-	c.Root().Background(t.Background)
+	winW, _ := c.Size()
+	bg, surface, cardBg, border, textPrimary, textSecondary, accent, footerBg := win11Theme(t)
+
+	c.Root().Background(bg)
 
 	status := a.settingsStatus
 	if a.settingsDirty() && (status == "" || status == "已保存") {
 		status = "有未保存的修改"
 	}
-	field := func(label string, build func()) ui.Element {
-		return ui.Field(c, label, build)
+
+	compactSidebar := winW < 640
+	sidebarWidth := float32(210)
+	padContentH := float32(24)
+	if compactSidebar {
+		sidebarWidth = 56
+		padContentH = 12
 	}
 
 	ui.Column(c).Fill().Children(func() {
-		ui.Row(c).Padding(16, 20).Gap(12).AlignItems(ui.Center).
-			BorderWidth(0, 0, 1, 0).BorderColor(t.Border).Children(func() {
-			ui.Column(c).Gap(2).Justify(ui.Center).Children(func() {
-				ui.Text(c, "设置").FontSize(20).Bold()
-				ui.Text(c, "翻译服务、语言和快捷键").FontSize(11).TextColor(t.TextMuted)
-			})
-			ui.Spacer(c)
-			ui.Badge(c, "密钥仅存本机").
-				Background(t.Surface).TextColor(t.TextMuted)
+		// Window Title Header
+		ui.Row(c).Height(38).Padding(0, 16).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, "划词翻译 设置").FontSize(13).Bold().TextColor(textPrimary)
 		})
 
-		ui.Scroll(c).Grow(1).Padding(18, 20).Children(func() {
-			ui.Column(c).Gap(22).Children(func() {
-				section(c, "翻译服务", "配置并管理翻译引擎。支持多引擎同时翻译对比，或按优先级自动重试。", func() {
-					card(c, func() {
-						ui.Checkbox(c, &a.form.MultiEngine, "多引擎同时翻译")
-						ui.Text(c, "开启后同时调用所有已启用的翻译服务并并列对比结果；关闭时按优先级顺序依次尝试并自动回退。").
-							FontSize(11).TextColor(t.TextMuted)
+		// Main Layout: Left Sidebar + Right Content Area
+		ui.Row(c).Grow(1).AlignItems(ui.Stretch).Children(func() {
+			// Left Navigation Sidebar (Responsive full or compact icon mode)
+			ui.Column(c).Width(sidebarWidth).Padding(8, 8).Gap(2).
+				BorderWidth(0, 1, 0, 0).BorderColor(border).
+				Background(bg).Children(func() {
+				navItem := func(idx int, label string, icon *ui.SVG) {
+					on := a.settingsTab == idx
+					btn := ui.ButtonBase(c).Height(40).Radius(4).
+						AlignItems(ui.Center).Gap(10).Tooltip(label)
+					if compactSidebar {
+						btn.Justify(ui.Center).Padding(0)
+					} else {
+						btn.Justify(ui.Start).Padding(0, 10)
+					}
+					if on {
+						btn.Background(ui.RGBA(0, 0, 0, 0.05))
+					}
+					if btn.Clicked() {
+						a.settingsTab = idx
+						a.settingsScroll.Y = 0
+					}
+					btn.Children(func() {
+						if on && !compactSidebar {
+							ui.Box(c).Width(3).Height(20).Radius(2).Background(accent)
+						}
+						ui.Box(c).Width(18).Height(18).AlignItems(ui.Center).Justify(ui.Center).Children(func() {
+							ui.Icon(c, icon).TextColor(accent)
+						})
+						if !compactSidebar {
+							ui.Text(c, label).FontSize(14).TextColor(textPrimary).SingleLine()
+						}
 					})
+				}
 
-					removeAt, moveFrom, moveTo := -1, -1, -1
-					for i := range a.form.Providers {
-						p := &a.form.Providers[i]
-						armed := a.providerDeleteArmed == p.ID
-						ui.Column(c.Key(p.ID)).Gap(10).Padding(14).Radius(10).
-							Background(t.Surface).Border(1, t.Border).Children(func() {
-							ui.Row(c).Gap(8).Children(func() {
-								ui.Checkbox(c, &p.Enabled, "启用")
-								ui.Text(c, providerKindName(p.Kind)).Bold()
-								ui.Badge(c, fmt.Sprintf("优先级 %d", i+1)).
-									Background(t.Accent.Alpha(0.12)).TextColor(t.Accent)
-								ui.Spacer(c)
-								if ui.Button(c, "上移").Tooltip("提高优先级").Disabled(i == 0).Clicked() {
-									moveFrom, moveTo = i, i-1
-									a.providerDeleteArmed = ""
-									a.settingsStatus = "已调整优先级，保存后生效"
-								}
-								if ui.Button(c, "下移").Tooltip("降低优先级").
-									Disabled(i == len(a.form.Providers)-1).Clicked() {
-									moveFrom, moveTo = i, i+1
-									a.providerDeleteArmed = ""
-									a.settingsStatus = "已调整优先级，保存后生效"
-								}
-								label := "删除"
-								if armed {
-									label = "确认删除"
-								}
-								del := ui.Button(c, label)
-								if armed {
-									del.Background(t.Danger).TextColor(t.AccentText)
-								}
-								if del.Tooltip("删除这个翻译服务").Clicked() {
-									if armed {
-										removeAt = i
-										a.providerDeleteArmed = ""
-										a.settingsStatus = "已移除「" + p.Name + "」，保存后生效"
-									} else {
-										a.providerDeleteArmed = p.ID
-										a.settingsStatus = "再点一次「确认删除」移除「" + p.Name + "」"
+				navItem(0, "常规", iconGeneral)
+				navItem(1, "翻译引擎", iconTranslate)
+				navItem(2, "快捷键", iconKeyboard)
+				navItem(3, "外观与风格", iconAppearance)
+				navItem(4, "关于", iconAbout)
+			})
+
+			// Right Content Area (Fluid & Responsive Scroll)
+			ui.Column(c).Grow(1).Padding(14, padContentH, 16, padContentH).Children(func() {
+				ui.Scroll(c).Grow(1).TrackScroll(&a.settingsScroll).Padding(0, 0, 10, 0).Children(func() {
+					switch a.settingsTab {
+					case 0:
+						// 常规
+						ui.Text(c, "常规").FontSize(24).Bold().TextColor(textPrimary)
+						ui.Box(c).Height(12)
+
+						ui.Text(c, "行为").FontSize(14).Bold().TextColor(textPrimary)
+						ui.Box(c).Height(6)
+						ui.Column(c).Radius(6).Background(cardBg).Border(1, border).Children(func() {
+							settingRow(c, "登录 Windows 时自动启动", "开机后自动在后台托盘就绪", func() {
+								ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+									txt := "关"
+									if a.openAtLogin {
+										txt = "开"
 									}
+									ui.Text(c, txt).FontSize(13).TextColor(textSecondary)
+									if ui.Switch(c, &a.openAtLogin).Changed() {
+										if err := mygo.App.SetOpenAtLogin(a.openAtLogin); err != nil {
+											a.settingsStatus = "开机启动设置失败：" + err.Error()
+										} else {
+											a.settingsStatus = "开机启动已更新"
+										}
+									}
+								})
+							})
+
+							settingRow(c, "自动朗读译文", "获得翻译结果后自动发音朗读", func() {
+								ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+									txt := "关"
+									if a.form.AutoSpeak {
+										txt = "开"
+									}
+									ui.Text(c, txt).FontSize(13).TextColor(textSecondary)
+									ui.Switch(c, &a.form.AutoSpeak)
+								})
+							})
+
+							settingRow(c, "划词即译助手", "鼠标划选文本后在光标旁显示翻译悬浮按钮", func() {
+								ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+									txt := "关"
+									if a.toolbarEnabled {
+										txt = "开"
+									}
+									ui.Text(c, txt).FontSize(13).TextColor(textSecondary)
+									ui.Switch(c, &a.toolbarEnabled)
+								})
+							})
+
+							settingRow(c, "浮窗默认固定", "打开翻译浮窗时默认保持置顶且点击外部不自动关闭", func() {
+								ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+									txt := "关"
+									if a.form.PopupPinned {
+										txt = "开"
+									}
+									ui.Text(c, txt).FontSize(13).TextColor(textSecondary)
+									ui.Switch(c, &a.form.PopupPinned)
+								})
+							})
+						})
+
+						ui.Box(c).Height(16)
+						ui.Text(c, "语言首选项").FontSize(14).Bold().TextColor(textPrimary)
+						ui.Box(c).Height(6)
+						ui.Column(c).Radius(6).Background(cardBg).Border(1, border).Children(func() {
+							settingRow(c, "默认目标语言", "选中文本后默认翻译成的语言", func() {
+								ui.Select(c, &a.form.TargetLang, targetLanguages).Width(160)
+							})
+							settingRow(c, "源语言", "留空或填写「自动检测」即可", func() {
+								ui.TextInput(c, &a.form.SourceLang).Width(160).Placeholder("自动检测")
+							})
+						})
+
+					case 1:
+						// 翻译引擎
+						ui.Text(c, "翻译引擎").FontSize(24).Bold().TextColor(textPrimary)
+						ui.Box(c).Height(12)
+
+						// 核心配置卡片
+						ui.Column(c).Radius(6).Background(cardBg).Border(1, border).Children(func() {
+							settingRow(c, "翻译服务", "选择默认使用的在线翻译引擎", func() {
+								activeName := a.providerName
+								if activeName == "" {
+									activeName = "OpenAI Compatible"
 								}
+								ui.Box(c).Padding(4, 10).Radius(4).Background(surface).Border(1, border).Children(func() {
+									ui.Text(c, activeName).FontSize(13).TextColor(textPrimary)
+								})
 							})
 
-							field("名称", func() {
-								ui.TextInput(c, &p.Name).Placeholder("用于区分多个同类服务")
+							settingRow(c, "目标语言", "划词后翻译成的语言", func() {
+								ui.Select(c, &a.form.TargetLang, targetLanguages).Width(160)
 							})
 
-							switch p.Kind {
-							case providerOpenAI:
-								field("接口地址", func() {
-									ui.TextInput(c, &p.BaseURL).Placeholder("https://api.openai.com/v1")
+							settingRow(c, "触发方式", "选中文本后如何显示翻译", func() {
+								ui.Select(c, &a.form.TriggerMode, triggerModes).Width(160)
+							})
+						})
+
+						ui.Box(c).Height(18)
+						ui.Text(c, "行为").FontSize(14).Bold().TextColor(textPrimary)
+						ui.Box(c).Height(6)
+						ui.Column(c).Radius(6).Background(cardBg).Border(1, border).Children(func() {
+							settingRow(c, "登录 Windows 时自动启动", "开机后自动在后台就绪", func() {
+								ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+									txt := "关"
+									if a.openAtLogin {
+										txt = "开"
+									}
+									ui.Text(c, txt).FontSize(13).TextColor(textSecondary)
+									if ui.Switch(c, &a.openAtLogin).Changed() {
+										if err := mygo.App.SetOpenAtLogin(a.openAtLogin); err != nil {
+											a.settingsStatus = "开机启动设置失败：" + err.Error()
+										} else {
+											a.settingsStatus = "开机启动已更新"
+										}
+									}
 								})
-								field("模型", func() {
-									ui.TextInput(c, &p.Model).Placeholder("gpt-4o-mini")
+							})
+
+							settingRow(c, "自动朗读译文", "翻译成功后自动进行语音朗读", func() {
+								ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+									txt := "关"
+									if a.form.AutoSpeak {
+										txt = "开"
+									}
+									ui.Text(c, txt).FontSize(13).TextColor(textSecondary)
+									ui.Switch(c, &a.form.AutoSpeak)
 								})
-								ui.Checkbox(c, &p.Vision, "支持图片（截图翻译）")
-							case providerAzure:
-								ui.Row(c).Gap(12).Children(func() {
+							})
+
+							settingRow(c, "全局快捷键：翻译选中文本", "划选文本后呼出翻译浮窗", func() {
+								hk := a.form.Hotkey
+								if hk == "" {
+									hk = "Ctrl + Alt + T"
+								}
+								ui.Box(c).Padding(3, 8).Radius(4).Background(surface).Border(1, border).Children(func() {
+									ui.Text(c, hk).FontSize(12).Bold().TextColor(textPrimary)
+								})
+							})
+						})
+
+						ui.Box(c).Height(18)
+						ui.Row(c).AlignItems(ui.Center).Children(func() {
+							ui.Text(c, "引擎管理与多引擎对比").FontSize(14).Bold().TextColor(textPrimary)
+							ui.Spacer(c)
+							ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+								ui.Text(c, "多引擎并发").FontSize(12).TextColor(textSecondary)
+								ui.Switch(c, &a.form.MultiEngine)
+							})
+						})
+						ui.Box(c).Height(6)
+
+						removeAt, moveFrom, moveTo := -1, -1, -1
+						for i := range a.form.Providers {
+							p := &a.form.Providers[i]
+							armed := a.providerDeleteArmed == p.ID
+							ui.Column(c.Key(p.ID)).Gap(8).Padding(12, 14).Radius(6).
+								Background(surface).Border(1, border).Children(func() {
+								ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+									ui.Switch(c, &p.Enabled)
+									ui.Text(c, providerKindName(p.Kind)).Bold().FontSize(13)
+									ui.Badge(c, fmt.Sprintf("优先级 %d", i+1)).
+										Background(accent.Alpha(0.12)).TextColor(accent)
+									ui.Spacer(c)
+									if ui.Button(c, "上移").Tooltip("提高优先级").Disabled(i == 0).Clicked() {
+										moveFrom, moveTo = i, i-1
+										a.providerDeleteArmed = ""
+										a.settingsStatus = "已调整优先级，保存后生效"
+									}
+									if ui.Button(c, "下移").Tooltip("降低优先级").
+										Disabled(i == len(a.form.Providers)-1).Clicked() {
+										moveFrom, moveTo = i, i+1
+										a.providerDeleteArmed = ""
+										a.settingsStatus = "已调整优先级，保存后生效"
+									}
+									label := "删除"
+									if armed {
+										label = "确认删除"
+									}
+									del := ui.Button(c, label)
+									if armed {
+										del.Background(t.Danger).TextColor(ui.RGB(255, 255, 255))
+									}
+									if del.Tooltip("删除这个翻译服务").Clicked() {
+										if armed {
+											removeAt = i
+											a.providerDeleteArmed = ""
+											a.settingsStatus = "已移除「" + p.Name + "」，保存后生效"
+										} else {
+											a.providerDeleteArmed = p.ID
+											a.settingsStatus = "再点一次「确认删除」移除「" + p.Name + "」"
+										}
+									}
+								})
+
+								ui.Row(c).Gap(10).Children(func() {
 									ui.Column(c).Grow(1).Children(func() {
-										field("接口地址（可选）", func() {
-											ui.TextInput(c, &p.Endpoint).Placeholder(defaultAzureEndpoint)
+										ui.Field(c, "服务名称", func() {
+											ui.TextInput(c, &p.Name).Placeholder("自定义显示名称")
 										})
 									})
-									ui.Column(c).Width(170).Children(func() {
-										field("区域（可选）", func() {
-											ui.TextInput(c, &p.Region).Placeholder("eastasia")
+									switch p.Kind {
+									case providerOpenAI:
+										ui.Column(c).Grow(1).Children(func() {
+											ui.Field(c, "模型", func() {
+												ui.TextInput(c, &p.Model).Placeholder("gpt-4o-mini")
+											})
+										})
+									}
+								})
+
+								switch p.Kind {
+								case providerOpenAI:
+									ui.Field(c, "接口地址 Base URL", func() {
+										ui.TextInput(c, &p.BaseURL).Placeholder("https://api.openai.com/v1")
+									})
+									ui.Checkbox(c, &p.Vision, "支持视觉模型截图翻译")
+								case providerAzure:
+									ui.Row(c).Gap(10).Children(func() {
+										ui.Column(c).Grow(1).Children(func() {
+											ui.Field(c, "接口地址（可选）", func() {
+												ui.TextInput(c, &p.Endpoint).Placeholder(defaultAzureEndpoint)
+											})
+										})
+										ui.Column(c).Width(140).Children(func() {
+											ui.Field(c, "区域（可选）", func() {
+												ui.TextInput(c, &p.Region).Placeholder("eastasia")
+											})
 										})
 									})
-								})
-							case providerBaidu:
-								field("接口地址（可选）", func() {
-									ui.TextInput(c, &p.Endpoint).Placeholder(defaultBaiduEndpoint)
-								})
-								field("APP ID", func() {
-									ui.TextInput(c, &p.AppID)
-								})
-							}
-
-							keyLabel := "API Key"
-							keyPlaceholder := "sk-…"
-							switch p.Kind {
-							case providerAzure:
-								keyLabel = "订阅 Key"
-								keyPlaceholder = "Azure 订阅密钥"
-							case providerBaidu:
-								keyLabel = "密钥 Secret"
-								keyPlaceholder = "百度翻译密钥"
-							}
-							field(keyLabel, func() {
-								ui.TextInput(c, &p.Key).Password().Placeholder(keyPlaceholder)
-							}).Description("保存在 Windows 凭据管理器，不写入配置文件。")
-						})
-					}
-
-					// Apply list changes after rendering, so the pointers above
-					// stay valid while the rows are built.
-					if removeAt >= 0 {
-						a.form.Providers = append(a.form.Providers[:removeAt], a.form.Providers[removeAt+1:]...)
-					} else if moveFrom >= 0 {
-						a.form.Providers[moveFrom], a.form.Providers[moveTo] = a.form.Providers[moveTo], a.form.Providers[moveFrom]
-					}
-
-					if len(a.form.Providers) == 0 {
-						card(c, func() {
-							ui.Text(c, "还没有翻译服务").Bold()
-							ui.Text(c, "至少添加一个服务才能开始翻译。").
-								FontSize(12).TextColor(t.TextMuted)
-						})
-					}
-
-					ui.Row(c).Gap(8).Wrap().Children(func() {
-						if ui.Button(c, "+ OpenAI Compatible").Clicked() {
-							a.addFormProvider(providerOpenAI)
-						}
-						if ui.Button(c, "+ Azure 翻译").Clicked() {
-							a.addFormProvider(providerAzure)
-						}
-						if ui.Button(c, "+ 百度翻译").Clicked() {
-							a.addFormProvider(providerBaidu)
-						}
-					})
-				})
-
-				section(c, "语言", "自动方向会在中文原文时译成英文，其他语言译成简体中文。", func() {
-					card(c, func() {
-						ui.Row(c).Gap(14).Children(func() {
-							ui.Column(c).Grow(1).Gap(4).Children(func() {
-								field("目标语言", func() {
-									ui.Select(c, &a.form.TargetLang, targetLanguages).Label("目标语言")
-								})
-								if a.form.TargetLang == autoTarget {
-									ui.Text(c, "中文 → 英文，其他 → 简体中文").
-										FontSize(11).TextColor(t.TextMuted)
+								case providerBaidu:
+									ui.Row(c).Gap(10).Children(func() {
+										ui.Column(c).Grow(1).Children(func() {
+											ui.Field(c, "接口地址（可选）", func() {
+												ui.TextInput(c, &p.Endpoint).Placeholder(defaultBaiduEndpoint)
+											})
+										})
+										ui.Column(c).Width(140).Children(func() {
+											ui.Field(c, "APP ID", func() {
+												ui.TextInput(c, &p.AppID)
+											})
+										})
+									})
 								}
-							})
-							ui.Column(c).Grow(1).Gap(4).Children(func() {
-								field("源语言", func() {
-									ui.TextInput(c, &a.form.SourceLang).Placeholder("自动检测")
-								})
-								ui.Text(c, "留空或填写「自动检测」即可。").
-									FontSize(11).TextColor(t.TextMuted)
-							})
-						})
-					})
-				})
 
-				section(c, "快捷键", "使用 Ctrl、Alt、Shift、CmdOrCtrl 加一个按键。保存后立即生效。", func() {
-					card(c, func() {
-						ui.Row(c).Gap(14).Children(func() {
-							ui.Column(c).Grow(1).Children(func() {
-								field("翻译选中文本", func() {
-									ui.TextInput(c, &a.form.Hotkey).Placeholder("Alt+Shift+D")
-								})
+								keyLabel := "API Key"
+								keyPlaceholder := "sk-…"
+								switch p.Kind {
+								case providerAzure:
+									keyLabel = "订阅 Key"
+									keyPlaceholder = "Azure 订阅密钥"
+								case providerBaidu:
+									keyLabel = "密钥 Secret"
+									keyPlaceholder = "百度翻译密钥"
+								}
+								ui.Field(c, keyLabel, func() {
+									ui.TextInput(c, &p.Key).Password().Placeholder(keyPlaceholder)
+								}).Description("密钥保存在 Windows 凭据管理器，不写入明文配置文件。")
 							})
-							ui.Column(c).Grow(1).Children(func() {
-								field("截图翻译", func() {
-									ui.TextInput(c, &a.form.ScreenshotHotkey).Placeholder("Alt+Shift+S")
-								})
-							})
-						})
-					})
-				})
-
-				section(c, "翻译风格", "提示词会随请求发送给支持系统提示词的服务。", func() {
-					card(c, func() {
-						ui.Field(c, "系统提示词", func() {
-							ui.TextArea(c, &a.form.SystemPrompt).Lines(3, 8)
-						}).Description("{{target}} 会替换成目标语言；{{source}} 会替换成源语言。")
-					})
-				})
-
-				section(c, "行为", "这些选项会影响程序启动和划词助手。", func() {
-					card(c, func() {
-						if ui.Checkbox(c, &a.openAtLogin, "开机启动").Changed() {
-							if err := mygo.App.SetOpenAtLogin(a.openAtLogin); err != nil {
-								a.settingsStatus = "开机启动设置失败：" + err.Error()
-							} else {
-								a.settingsStatus = "开机启动已更新"
-							}
+							ui.Box(c).Height(6)
 						}
-						ui.Checkbox(c, &a.toolbarEnabled, "拖动选择后显示划词助手")
-						ui.Text(c, "拖选文字后松开鼠标，选区旁会出现「文A / 复制 / ×」工具条，保存设置后生效。系统终端窗口会跳过，避免触发 Ctrl+C。").
-							FontSize(11).TextColor(t.TextMuted)
-					})
-				})
 
-				if dir := userDataDir(); dir != "" {
-					ui.Text(c, "数据目录："+dir).
-						FontSize(11).TextColor(t.TextMuted).SingleLine().Tooltip(dir)
-				}
+						if removeAt >= 0 {
+							a.form.Providers = append(a.form.Providers[:removeAt], a.form.Providers[removeAt+1:]...)
+						} else if moveFrom >= 0 {
+							a.form.Providers[moveFrom], a.form.Providers[moveTo] = a.form.Providers[moveTo], a.form.Providers[moveFrom]
+						}
+
+						ui.Row(c).Gap(8).Wrap().Children(func() {
+							if ui.Button(c, "+ OpenAI Compatible").Clicked() {
+								a.addFormProvider(providerOpenAI)
+							}
+							if ui.Button(c, "+ Azure 翻译").Clicked() {
+								a.addFormProvider(providerAzure)
+							}
+							if ui.Button(c, "+ 百度翻译").Clicked() {
+								a.addFormProvider(providerBaidu)
+							}
+						})
+
+					case 2:
+						// 快捷键
+						ui.Text(c, "快捷键").FontSize(24).Bold().TextColor(textPrimary)
+						ui.Box(c).Height(12)
+
+						ui.Column(c).Radius(6).Background(cardBg).Border(1, border).Children(func() {
+							settingRow(c, "全局快捷键：翻译选中文本", "选中文本后按快捷键立即呼出翻译浮窗", func() {
+								ui.TextInput(c, &a.form.Hotkey).Width(160).Placeholder("Ctrl+Alt+T")
+							})
+
+							settingRow(c, "全局快捷键：截图翻译", "截取屏幕任意区域并调用视觉模型识别翻译", func() {
+								ui.TextInput(c, &a.form.ScreenshotHotkey).Width(160).Placeholder("Alt+Shift+S")
+							})
+
+							settingRow(c, "输入翻译快捷键", "快速呼出独立的双栏输入翻译窗口", func() {
+								ui.TextInput(c, &a.form.InputHotkey).Width(160).Placeholder("Ctrl+Alt+I")
+							})
+						})
+
+					case 3:
+						// 外观与风格
+						ui.Text(c, "外观与风格").FontSize(24).Bold().TextColor(textPrimary)
+						ui.Box(c).Height(12)
+
+						ui.Text(c, "系统提示词").FontSize(14).Bold().TextColor(textPrimary)
+						ui.Box(c).Height(6)
+						ui.Column(c).Radius(6).Background(cardBg).Border(1, border).Padding(14).Children(func() {
+							ui.Field(c, "翻译系统提示词", func() {
+								ui.TextArea(c, &a.form.SystemPrompt).Lines(3, 6)
+							}).Description("{{target}} 代表目标语言，{{source}} 代表源语言。")
+						})
+
+					case 4:
+						// 关于
+						ui.Text(c, "关于").FontSize(24).Bold().TextColor(textPrimary)
+						ui.Box(c).Height(12)
+
+						ui.Column(c).Radius(6).Background(cardBg).Border(1, border).Padding(16).Gap(10).Children(func() {
+							ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
+								ui.Box(c).Width(36).Height(36).Radius(8).Background(accent).
+									AlignItems(ui.Center).Justify(ui.Center).Children(func() {
+									ui.Icon(c, iconTranslate).TextColor(ui.RGB(255, 255, 255))
+								})
+								ui.Column(c).Children(func() {
+									ui.Text(c, "Hayami Translator 划词翻译").Bold().FontSize(15).TextColor(textPrimary)
+									ui.Text(c, "Windows 11 原生风格轻量划词翻译工具").FontSize(12).TextColor(textSecondary)
+								})
+							})
+
+							ui.Text(c, "安全特性：所有 API Key 均存储于 Windows 凭据管理器（Credential Manager），配置文件与日志中绝不存储明文敏感信息。").
+								FontSize(12).TextColor(textSecondary)
+
+							if dir := userDataDir(); dir != "" {
+								ui.Text(c, "数据目录："+dir).FontSize(11).TextColor(textSecondary)
+							}
+						})
+					}
+				})
 			})
 		})
 
-		ui.Row(c).Padding(14, 20).Gap(12).AlignItems(ui.Center).
-			BorderWidth(1, 0, 0, 0).BorderColor(t.Border).Children(func() {
-			ui.Column(c).Grow(1).Gap(2).Justify(ui.Center).Children(func() {
-				if status != "" {
-					ui.Text(c, status).FontSize(12).
-						TextColor(statusColor(t, status)).SingleLine().
-						Tooltip(status)
-				}
-				if a.hotkeyErr != "" {
-					ui.Text(c, a.hotkeyErr).FontSize(11).TextColor(t.Danger).SingleLine().
-						Tooltip(a.hotkeyErr)
-				}
-				if status == "" && a.hotkeyErr == "" {
-					ui.Text(c, "修改后点保存设置生效").FontSize(11).TextColor(t.TextMuted)
-				}
-			})
+		// Bottom Save & Action Bar
+		ui.Row(c).Height(48).Padding(0, 16).Gap(10).AlignItems(ui.Center).
+			BorderWidth(1, 0, 0, 0).BorderColor(border).
+			Background(footerBg).Children(func() {
+			if status != "" {
+				ui.Text(c, status).FontSize(12).
+					TextColor(statusColor(t, status)).SingleLine().Shrink(1)
+			}
+			if a.hotkeyErr != "" {
+				ui.Text(c, a.hotkeyErr).FontSize(12).TextColor(t.Danger).SingleLine().Shrink(1)
+			}
+			ui.Spacer(c)
 			if ui.Button(c, "历史记录").Clicked() {
 				a.showHistory()
 			}

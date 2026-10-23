@@ -5,7 +5,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -47,6 +49,10 @@ var (
 	user32                         = windows.NewLazySystemDLL("user32.dll")
 	procSendInput                  = user32.NewProc("SendInput")
 	procGetClipboardSequenceNumber = user32.NewProc("GetClipboardSequenceNumber")
+
+	// selectionReadMu serializes clipboard reads: concurrent calls would
+	// save each other's in-progress clipboard state and restore it later.
+	selectionReadMu sync.Mutex
 )
 
 func clipboardSeq() uint32 {
@@ -87,16 +93,26 @@ func sendCtrlC() bool {
 
 // readSelectedText copies the selection of the foreground window by sending
 // Ctrl+C and reading the clipboard. The previous clipboard contents are
-// restored afterwards. It must run off the main thread: mygo's clipboard
-// calls marshal to it.
+// restored afterwards. It detects the copy through the clipboard sequence
+// number, so it never writes a probe that clipboard history would record.
+// It must run off the main thread: mygo's clipboard calls marshal to it.
 func readSelectedText() (string, error) {
+	selectionReadMu.Lock()
+	defer selectionReadMu.Unlock()
+
 	saved, saveErr := mygo.Clipboard.Read()
 	if saveErr != nil {
 		return "", fmt.Errorf("读取当前剪贴板失败：%w", saveErr)
 	}
-	probe := fmt.Sprintf("hayami-clipboard-probe-%d", time.Now().UnixNano())
-	mygo.Clipboard.WriteText(probe)
-	defer restoreClipboard(saved)
+	copied := false
+	defer func() {
+		if !copied {
+			return
+		}
+		if err := restoreClipboard(saved); err != nil {
+			log.Printf("恢复剪贴板失败: %v", err)
+		}
+	}()
 
 	before := clipboardSeq()
 
@@ -108,26 +124,24 @@ func readSelectedText() (string, error) {
 	deadline := time.Now().Add(600 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if clipboardSeq() != before {
+			copied = true
 			break
 		}
 		time.Sleep(15 * time.Millisecond)
 	}
+	if !copied {
+		return "", nil
+	}
 	time.Sleep(30 * time.Millisecond)
 
-	text := mygo.Clipboard.ReadText()
-	text = strings.TrimSpace(text)
-	if text == probe {
-		text = ""
-	}
-	return text, nil
+	return strings.TrimSpace(mygo.Clipboard.ReadText()), nil
 }
 
-func restoreClipboard(saved transfer.Data) {
+func restoreClipboard(saved transfer.Data) error {
 	if len(saved.Items()) == 0 {
-		mygo.Clipboard.Clear()
-		return
+		return mygo.Clipboard.Write(transfer.Data{})
 	}
-	_ = mygo.Clipboard.Write(saved)
+	return mygo.Clipboard.Write(saved)
 }
 
 // waitClipboardImage waits until the clipboard changes and holds an image.

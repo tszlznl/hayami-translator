@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"strings"
 
@@ -16,37 +17,82 @@ var targetLanguages = []string{
 	"Italiano", "العربية", "ไทย", "Tiếng Việt",
 }
 
-// popupView is the translation panel: the source, a target language, the
-// streamed Markdown reply, and the ways to copy or retry it.
+// popupView renders the Windows 11 Fluent floating translation card with responsive layout.
 func (a *app) popupView(c *ui.Context) {
 	t := c.Theme()
-	c.Root().Background(t.Background).Border(1, t.Border).Radius(10)
+	winW, _ := c.Size()
+	_, surface, _, border, textPrimary, textSecondary, accent, footerBg := win11Theme(t)
+
+	c.Root().Background(surface).Border(1, border).Radius(8).
+		Shadow(0, 8, 20, 0, ui.RGBA(0, 0, 0, 0.18))
 	c.OnShortcut(0, ui.KeyEscape, func() { a.hidePopup() })
 	c.OnShortcut(ui.Ctrl, ui.KeyEnter, func() { a.startTranslation() })
 
 	ui.Column(c).Fill().Children(func() {
-		// The header is the drag region. Keeping the actions here makes the
-		// panel feel like a small window instead of a form with a title bar.
-		ui.Row(c).Height(52).Padding(10, 16).Gap(10).AlignItems(ui.Center).
-			BorderWidth(0, 0, 1, 0).BorderColor(t.Border).DragWindow().Children(func() {
-			ui.Box(c).Width(28).Height(28).Radius(8).Background(t.Accent).
-				AlignItems(ui.Center).Justify(ui.Center).Children(func() {
-				ui.Text(c, "H").Bold().TextColor(t.AccentText)
+		// Responsive Header Bar
+		padH := float32(14)
+		if winW < 340 {
+			padH = 8
+		}
+		ui.Row(c).Height(38).Padding(6, 6, 0, padH).AlignItems(ui.Center).DragWindow().Children(func() {
+			srcDisplay := "自动检测"
+			if a.hasImage {
+				srcDisplay = "截图"
+			} else if strings.TrimSpace(a.source) != "" {
+				srcDisplay = detectLanguageName(a.source)
+			}
+			ui.Text(c, srcDisplay).FontSize(12).TextColor(textSecondary).Shrink(1)
+
+			ui.Box(c).Width(14).Height(14).AlignItems(ui.Center).Justify(ui.Center).Children(func() {
+				ui.Icon(c, iconArrowRight)
 			})
-			ui.Column(c).Gap(1).Justify(ui.Center).Children(func() {
-				ui.Text(c, "Hayami Translator").Bold().FontSize(14)
-				ui.Text(c, "选中即译 · 支持输入和截图").FontSize(11).TextColor(t.TextMuted)
+
+			// Target language selection
+			targetLabel := a.targetLang
+			if targetLabel == "" {
+				targetLabel = autoTarget
+			}
+			displayLabel := targetLabel
+			if targetLabel == autoTarget && strings.TrimSpace(a.source) != "" {
+				displayLabel = "自动 (" + effectiveTarget(autoTarget, a.source) + ")"
+			}
+			targetBtn := ui.ButtonBase(c).Radius(4).Padding(2, 6).
+				Tooltip("切换目标语言")
+			if targetBtn.Clicked() {
+				nextIdx := 0
+				for i, lang := range targetLanguages {
+					if lang == a.targetLang {
+						nextIdx = (i + 1) % len(targetLanguages)
+						break
+					}
+				}
+				a.targetLang = targetLanguages[nextIdx]
+				a.cfg.TargetLang = a.targetLang
+				a.form.TargetLang = a.targetLang
+				if err := a.cfg.save(); err != nil {
+					log.Print("saving target lang: ", err)
+				}
+				if a.hasAnyResult() && !a.streaming {
+					a.startTranslation()
+				}
+			}
+			targetBtn.Children(func() {
+				ui.Text(c, displayLabel).Bold().FontSize(12).TextColor(accent).SingleLine()
 			})
+
 			ui.Spacer(c)
-			pinTip := "固定后点击其他窗口不自动关闭"
+
+			// Pin window button
+			pinTip := "固定窗口"
 			if a.popupPinned {
 				pinTip = "取消固定"
 			}
-			pin := ui.Button(c, "固定").Tooltip(pinTip)
+			pinBtn := ui.ButtonBase(c).Width(28).Height(28).Radius(4).
+				Justify(ui.Center).AlignItems(ui.Center).Tooltip(pinTip)
 			if a.popupPinned {
-				pin.Background(t.Accent.Alpha(0.14)).TextColor(t.Accent)
+				pinBtn.Background(accent.Alpha(0.14))
 			}
-			if pin.Clicked() {
+			if pinBtn.Clicked() {
 				a.popupPinned = !a.popupPinned
 				if a.popupPinned {
 					a.status = "弹窗已固定"
@@ -54,218 +100,166 @@ func (a *app) popupView(c *ui.Context) {
 					a.status = "已取消固定"
 				}
 			}
-			if ui.Button(c, "历史").Tooltip("查看翻译历史").Clicked() {
-				a.hidePopup()
-				a.showHistory()
-			}
-			if ui.Button(c, "设置").Tooltip("打开设置").Clicked() {
-				a.hidePopup()
-				a.showSettings()
-			}
-			if ui.Button(c, "✕").Label("关闭").Tooltip("关闭 (Esc)").Clicked() {
-				a.hidePopup()
-			}
-		})
-
-		ui.Column(c).Grow(1).Padding(16).Gap(10).Children(func() {
-			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				label := "原文"
-				if a.hasImage {
-					label = "截图"
-				}
-				ui.Text(c, label).FontSize(12).Bold().TextColor(t.TextMuted)
-				if a.hasImage {
-					ui.Badge(c, "视觉模型识别").
-						Background(t.Accent.Alpha(0.12)).TextColor(t.Accent)
-				} else if n := len([]rune(a.source)); n > 0 {
-					ui.Text(c, fmt.Sprintf("%d 字符", n)).FontSize(11).TextColor(t.TextMuted)
-				}
-				ui.Spacer(c)
-				if !a.hasImage && !a.streaming && strings.TrimSpace(a.source) != "" {
-					if ui.Button(c, "清空").Tooltip("清空原文和译文").Clicked() {
-						a.resetTranslation()
-						a.focusInput = true
-					}
-				}
+			pinBtn.Children(func() {
+				ui.Icon(c, iconPin)
 			})
 
+			// Close button
+			closeBtn := ui.ButtonBase(c).Width(28).Height(28).Radius(4).
+				Justify(ui.Center).AlignItems(ui.Center).Tooltip("关闭 (Esc)")
+			if closeBtn.Clicked() {
+				a.hidePopup()
+			}
+			closeBtn.Children(func() {
+				ui.Icon(c, iconClose)
+			})
+		})
+
+		// Translation Content Area (Fluid / Scrollable)
+		ui.Column(c).Grow(1).Padding(4, padH, 8, padH).Gap(6).Children(func() {
 			if a.hasImage {
-				ui.Column(c).Gap(3).Padding(12, 10).Radius(8).
-					Background(t.Surface).Border(1, t.Border).Children(func() {
-					ui.Text(c, "已截取屏幕区域").Bold().FontSize(13)
-					ui.Text(c, "结果由视觉模型识别并翻译。").FontSize(12).TextColor(t.TextMuted)
+				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+					ui.Badge(c, "视觉模型截图识别").Background(accent.Alpha(0.12)).TextColor(accent)
 				})
-			} else {
+			} else if strings.TrimSpace(a.source) == "" {
 				ui.TextArea(c, &a.source).
 					Bind(&a.inputHandle).
-					Lines(2, 6).
-					Placeholder("输入文字，或选中任意窗口里的文字后按 " + a.cfg.Hotkey)
+					Grow(1).
+					Placeholder("输入文字后按 Ctrl+Enter 翻译…")
 				if a.focusInput {
 					a.inputHandle.Focus(c)
 					a.focusInput = false
 				}
+			} else {
+				srcText := strings.TrimSpace(a.source)
+				maxRune := 80
+				if winW < 340 {
+					maxRune = 40
+				}
+				if len([]rune(srcText)) > maxRune {
+					srcText = string([]rune(srcText)[:maxRune]) + "…"
+				}
+				ui.Text(c, srcText).FontSize(12).TextColor(textSecondary).SingleLine()
 			}
 
-			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				if a.streaming {
-					if ui.Button(c, "停止").Tooltip("停止当前翻译").Clicked() {
-						a.cancelStream()
-						a.status = "已停止"
-					}
-				} else if ui.PrimaryButton(c, "翻译").Tooltip("翻译 (Ctrl+Enter)").Clicked() {
-					a.startTranslation()
-				}
+			if a.streaming && !a.multiEngine {
+				a.popupScroll.Y = math.MaxFloat32
+			}
 
-				if ui.Button(c, "复制").Disabled(!a.hasAnyResult()).
-					Tooltip("复制译文").Clicked() {
-					a.copyResult()
-				}
-				if a.hasAnyResult() && !a.streaming {
-					if ui.Button(c, "重译").Tooltip("重新翻译原文").Clicked() {
-						a.startTranslation()
-					}
-				}
-				if ui.Checkbox(c, &a.multiEngine, "多引擎").
-					Tooltip("同时调用所有已启用的翻译服务并对比结果").Changed() {
-					a.cfg.MultiEngine = a.multiEngine
-					a.form.MultiEngine = a.multiEngine
-					if err := a.cfg.save(); err != nil {
-						a.status = "设置保存失败：" + err.Error()
-					}
-					if a.hasAnyResult() && !a.streaming {
-						a.startTranslation()
-					}
-				}
-
-				ui.Spacer(c)
-				ui.Text(c, "目标").FontSize(11).TextColor(t.TextMuted)
-				if ui.Select(c, &a.targetLang, targetLanguages).
-					Width(164).Label("目标语言").Tooltip("翻译成哪种语言").Changed() {
-					a.cfg.TargetLang = a.targetLang
-					a.form.TargetLang = a.targetLang
-					if err := a.cfg.save(); err != nil {
-						a.status = "目标语言保存失败：" + err.Error()
-					}
-					if a.hasAnyResult() && !a.streaming {
-						a.startTranslation()
-					}
-				}
-			})
-
-			ui.Column(c).Grow(1).Radius(10).Background(t.Surface).
-				Border(1, t.Border).Children(func() {
-				ui.Row(c).Padding(10, 12).Gap(8).AlignItems(ui.Center).Children(func() {
-					title := "译文"
-					if a.multiEngine && len(a.results) > 0 {
-						title = "译文（多引擎对比）"
-					}
-					ui.Text(c, title).FontSize(12).Bold().TextColor(t.TextMuted)
-					switch {
-					case a.errText != "":
-						ui.Badge(c, "失败").Background(t.Danger.Alpha(0.12)).TextColor(t.Danger)
-					case a.streaming:
-						ui.Badge(c, "翻译中").Background(t.Warning.Alpha(0.12)).TextColor(t.Warning)
-					case a.hasAnyResult():
-						ui.Badge(c, "完成").Background(t.Success.Alpha(0.12)).TextColor(t.Success)
-					}
-					ui.Spacer(c)
-					if a.status != "" && a.hasAnyResult() && !a.streaming {
-						ui.Text(c, a.status).FontSize(11).
-							TextColor(statusColor(t, a.status)).SingleLine().Tooltip(a.status)
-					}
-				})
-
-				if a.streaming && !a.multiEngine {
-					a.popupScroll.Y = math.MaxFloat32
-				}
-				ui.Scroll(c).Grow(1).TrackScroll(&a.popupScroll).
-					Padding(0, 12, 12, 12).Children(func() {
-					if a.multiEngine && len(a.results) > 0 {
-						ui.Column(c).Gap(10).Children(func() {
-							for i := range a.results {
-								r := &a.results[i]
-								ui.Column(c.Key(r.ID)).Gap(6).Padding(10, 12).Radius(8).
-									Background(t.Background).Border(1, t.Border).Children(func() {
-									ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-										ui.Text(c, r.Name).Bold().FontSize(12)
-										ui.Badge(c, providerKindName(r.Kind)).
-											Background(t.Surface).TextColor(t.TextMuted)
-										if r.Streaming {
-											ui.Spinner(c)
-											ui.Badge(c, "翻译中").Background(t.Warning.Alpha(0.12)).TextColor(t.Warning)
-										} else if r.ErrText != "" && r.Result != "" {
-											ui.Badge(c, "部分中断").Background(t.Warning.Alpha(0.12)).TextColor(t.Warning)
-										} else if r.ErrText != "" {
-											ui.Badge(c, "失败").Background(t.Danger.Alpha(0.12)).TextColor(t.Danger)
-										} else if r.Result != "" {
-											ui.Badge(c, "完成").Background(t.Success.Alpha(0.12)).TextColor(t.Success)
-										}
-										ui.Spacer(c)
-										if ui.Button(c, "复制").Disabled(strings.TrimSpace(r.Result) == "").
-											Tooltip("复制该服务译文").Clicked() {
+			ui.Scroll(c).Grow(1).TrackScroll(&a.popupScroll).Children(func() {
+				switch {
+				case a.errText != "":
+					ui.Column(c).Gap(4).Children(func() {
+						ui.Text(c, a.errText).TextColor(t.Danger).FontSize(13)
+						ui.Text(c, "按 Ctrl+Enter 重试，或检查设置里的翻译服务。").FontSize(11).TextColor(textSecondary)
+					})
+				case a.multiEngine && len(a.results) > 0:
+					ui.Column(c).Gap(8).Children(func() {
+						for i := range a.results {
+							r := &a.results[i]
+							ui.Column(c.Key(r.ID)).Gap(4).Padding(8, 10).Radius(6).
+								Background(t.Background).Border(1, border).Children(func() {
+								ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+									ui.Text(c, r.Name).Bold().FontSize(12)
+									if r.Streaming {
+										ui.Spinner(c)
+									}
+									ui.Spacer(c)
+									if r.Result != "" {
+										if ui.Button(c, "复制").Tooltip("复制该服务译文").Clicked() {
 											mygo.Clipboard.WriteText(r.Result)
 											a.status = "已复制「" + r.Name + "」译文"
 										}
-									})
-									if r.Result != "" {
-										if r.Streaming {
-											markdown.Stream(c, r.Result, r.MD)
-										} else {
-											markdown.View(c, r.Result, r.MD)
-										}
-									}
-									if r.ErrText != "" {
-										ui.Text(c, r.ErrText).TextColor(t.Danger).FontSize(12)
-									} else if r.Result == "" && r.Streaming {
-										ui.Text(c, "正在请求…").FontSize(12).TextColor(t.TextMuted)
 									}
 								})
-							}
-						})
-					} else {
-						switch {
-						case a.errText != "":
-							ui.Column(c).Gap(6).Children(func() {
-								ui.Text(c, a.errText).TextColor(t.Danger)
-								ui.Text(c, "按 Ctrl+Enter 重试，或检查设置里的翻译服务。").FontSize(11).TextColor(t.TextMuted)
-							})
-						case a.result != "" && a.streaming:
-							markdown.Stream(c, a.result, &a.md)
-						case a.result != "":
-							markdown.View(c, a.result, &a.md)
-						case a.streaming:
-							ui.Row(c).Gap(8).Children(func() {
-								ui.Spinner(c)
-								ui.Text(c, "正在翻译…").TextColor(t.TextMuted)
-							})
-						default:
-							ui.Column(c).Gap(5).Padding(18, 14).AlignItems(ui.Center).Children(func() {
-								ui.Text(c, "译文将显示在这里").Bold().TextColor(t.TextMuted)
-								ui.Text(c, "输入文字后按 Ctrl+Enter，或选中文本后按 "+a.cfg.Hotkey).
-									FontSize(11).TextColor(t.TextMuted)
+								if r.Result != "" {
+									if r.Streaming {
+										markdown.Stream(c, r.Result, r.MD)
+									} else {
+										markdown.View(c, r.Result, r.MD)
+									}
+									if r.ErrText != "" {
+										ui.Text(c, "中断："+r.ErrText).TextColor(t.Danger).FontSize(11)
+									}
+								} else if r.ErrText != "" {
+									ui.Text(c, r.ErrText).TextColor(t.Danger).FontSize(12)
+								} else if r.Streaming {
+									ui.Text(c, "正在请求…").FontSize(12).TextColor(textSecondary)
+								}
 							})
 						}
+					})
+				case a.streaming:
+					ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+						ui.Spinner(c)
+						if a.result != "" {
+							markdown.Stream(c, a.result, &a.md)
+						} else {
+							ui.Text(c, "正在翻译…").FontSize(14).TextColor(textSecondary)
+						}
+					})
+				case a.result != "":
+					// Responsive font sizing based on window width and text length
+					resText := a.result
+					fontSize := float32(20)
+					if winW < 360 || len([]rune(resText)) > 60 {
+						fontSize = 16
 					}
-				})
+					if !strings.Contains(resText, "\n") && !strings.Contains(resText, "#") {
+						ui.Text(c, resText).Bold().FontSize(fontSize).TextColor(textPrimary)
+					} else {
+						markdown.View(c, resText, &a.md)
+					}
+				default:
+					if strings.TrimSpace(a.source) != "" {
+						ui.Text(c, "按 Ctrl+Enter 立即翻译").FontSize(13).TextColor(textSecondary)
+					}
+				}
 			})
 
-			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				foot := a.providerName
-				if a.multiEngine && len(a.results) > 0 {
-					foot = fmt.Sprintf("多引擎并发 (%d 个服务)", len(a.results))
-				} else if foot == "" {
-					foot = a.cfg.Model
+			// Engine info line
+			engineLabel := a.providerName
+			if a.multiEngine && len(a.results) > 0 {
+				engineLabel = fmt.Sprintf("多引擎并发 (%d 个服务)", len(a.results))
+			} else if engineLabel == "" {
+				engineLabel = a.cfg.Model
+			}
+			if engineLabel == "" {
+				engineLabel = "Microsoft Translator"
+			}
+			ui.Text(c, "引擎："+engineLabel).FontSize(11).TextColor(textSecondary).SingleLine()
+		})
+
+		// Bottom Action Bar
+		ui.Row(c).Height(38).Padding(4, padH).Gap(4).AlignItems(ui.Center).
+			BorderWidth(1, 0, 0, 0).BorderColor(border).
+			Background(footerBg).Radius(0, 0, 8, 8).Children(func() {
+			copyBtn := win11IconButton(c, iconCopy, "复制译文")
+			if copyBtn.Clicked() {
+				a.copyResult()
+			}
+
+			audioBtn := win11IconButton(c, iconAudio, "朗读译文")
+			if audioBtn.Clicked() {
+				if a.result != "" {
+					speakText(a.result)
+				} else if a.source != "" {
+					speakText(a.source)
 				}
-				if foot != "" {
-					ui.Badge(c, foot).Background(t.Surface).TextColor(t.TextMuted)
-				}
-				if a.status != "" && (!a.hasAnyResult() || a.streaming) {
-					ui.Text(c, a.status).FontSize(11).
-						TextColor(statusColor(t, a.status)).SingleLine().Tooltip(a.status)
-				}
-				ui.Spacer(c)
-				ui.Text(c, "Esc 关闭 · Ctrl+Enter 翻译").FontSize(11).TextColor(t.TextMuted)
-			})
+			}
+
+			if a.status != "" {
+				ui.Text(c, a.status).FontSize(11).
+					TextColor(statusColor(t, a.status)).SingleLine().Shrink(1)
+			}
+
+			ui.Spacer(c)
+
+			settingsBtn := win11IconButton(c, iconSettings, "翻译设置")
+			if settingsBtn.Clicked() {
+				a.hidePopup()
+				a.showSettings()
+			}
 		})
 	})
 }

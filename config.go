@@ -22,8 +22,12 @@ type Config struct {
 	SystemPrompt     string  `json:"systemPrompt"`
 	Hotkey           string  `json:"hotkey"`
 	ScreenshotHotkey string  `json:"screenshotHotkey"`
+	InputHotkey      string  `json:"inputHotkey,omitempty"`
 	Temperature      float64 `json:"temperature"`
 	MaxTokens        int     `json:"maxTokens"`
+	AutoSpeak        bool    `json:"autoSpeak,omitempty"`
+	PopupPinned      bool    `json:"popupPinned,omitempty"`
+	TriggerMode      string  `json:"triggerMode,omitempty"`
 
 	// DisableSelectionToolbar turns off the automatic toolbar that appears
 	// after a mouse selection. The zero value keeps it on, so configs from
@@ -48,10 +52,13 @@ func defaultConfig() Config {
 		TargetLang:       autoTarget,
 		SourceLang:       "自动检测",
 		SystemPrompt:     "你是专业翻译。把用户提供的文本翻译成{{target}}。只输出译文，不要解释；保留原文的段落、列表和 Markdown 格式；代码、命令、专有名词保持原样。如果原文已经是{{target}}，就把内容改写得更自然。",
-		Hotkey:           "Alt+Shift+D",
+		Hotkey:           "Ctrl+Alt+T",
 		ScreenshotHotkey: "Alt+Shift+S",
+		InputHotkey:      "Ctrl+Alt+I",
 		Temperature:      0.3,
 		MaxTokens:        2048,
+		PopupPinned:      false,
+		TriggerMode:      "显示图标，点击翻译",
 	}
 	cfg.Providers = []Provider{defaultOpenAIProvider(cfg.BaseURL, cfg.Model)}
 	cfg.ProvidersConfigured = true
@@ -59,7 +66,10 @@ func defaultConfig() Config {
 }
 
 func (c Config) clone() Config {
-	c.Providers = append([]Provider(nil), c.Providers...)
+	if c.Providers == nil {
+		return c
+	}
+	c.Providers = append([]Provider{}, c.Providers...)
 	return c
 }
 
@@ -208,6 +218,12 @@ func (c *Config) fillDefaults() {
 	}
 	if strings.TrimSpace(c.ScreenshotHotkey) == "" {
 		c.ScreenshotHotkey = d.ScreenshotHotkey
+	}
+	if strings.TrimSpace(c.InputHotkey) == "" {
+		c.InputHotkey = d.InputHotkey
+	}
+	if strings.TrimSpace(c.TriggerMode) == "" {
+		c.TriggerMode = d.TriggerMode
 	}
 	if c.MaxTokens <= 0 {
 		c.MaxTokens = d.MaxTokens
