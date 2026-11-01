@@ -18,14 +18,17 @@ func setSelectionToolbarEnabled(enabled bool) {
 
 // toolbarView renders either the 34x34 icon trigger or the 224px concise translation bubble.
 func (a *app) toolbarView(c *ui.Context) {
-	t := c.Theme()
-	_, surface, _, border, textPrimary, textSecondary, accent, _ := win11Theme(t)
+	t := fluentTheme(c)
+	pal := win11Theme(t)
 
-	c.Root().Background(surface).Border(1, border).Radius(8).
+	c.Root().Background(pal.Surface).Border(1, pal.Border).Radius(8).
 		Shadow(0, 4, 14, 0, ui.RGBA(0, 0, 0, 0.16))
 	c.OnShortcut(0, ui.KeyEscape, func() { a.hideSelectionToolbar() })
 
-	isBubble := a.getTriggerMode() == "取词即译气泡" || (a.toolbarIsBubble && a.getTriggerMode() != "显示图标，点击翻译")
+	mode := a.getTriggerMode()
+	// A bubble already on screen stays a bubble when the mode changes under
+	// it; only the icon mode switches it back.
+	isBubble := mode == triggerModeBubble || (a.toolbarIsBubble && mode == triggerModePopup)
 
 	if isBubble {
 		// 224px Windows 11 Fluent concise word bubble
@@ -39,23 +42,27 @@ func (a *app) toolbarView(c *ui.Context) {
 				if len([]rune(word)) > 14 {
 					word = string([]rune(word)[:14]) + "…"
 				}
-				ui.Text(c, word).Bold().FontSize(15).TextColor(textPrimary)
+				ui.Text(c, word).Bold().FontSize(15).TextColor(pal.TextPrimary)
 
 				if a.toolbarPhonetic != "" {
 					ui.Box(c).Width(6)
-					ui.Text(c, a.toolbarPhonetic).FontSize(11).TextColor(textSecondary)
+					ui.Text(c, a.toolbarPhonetic).FontSize(11).TextColor(pal.TextSecondary)
 				}
 
 				ui.Spacer(c)
 
 				// Audio TTS button
 				speakBtn := ui.ButtonBase(c).Width(24).Height(24).Radius(4).
-					Justify(ui.Center).AlignItems(ui.Center).Tooltip("朗读")
+					Justify(ui.Center).AlignItems(ui.Center).Tooltip("朗读（朗读中点击停止）")
 				if speakBtn.Clicked() {
-					speakText(a.toolbarText)
+					if isSpeaking() {
+						stopSpeaking()
+					} else {
+						speakText(a.toolbarText)
+					}
 				}
 				speakBtn.Children(func() {
-					ui.Icon(c, iconAudio).TextColor(textSecondary)
+					ui.Icon(c, iconAudio).TextColor(pal.TextSecondary)
 				})
 
 				// Expand to full translation popup button
@@ -65,14 +72,14 @@ func (a *app) toolbarView(c *ui.Context) {
 					a.toolbarTranslate()
 				}
 				expandBtn.Children(func() {
-					ui.Icon(c, iconExpand).TextColor(textSecondary)
+					ui.Icon(c, iconExpand).TextColor(pal.TextSecondary)
 				})
 			})
 
 			// Bottom row: Part of speech + Concise definition
 			ui.Row(c).AlignItems(ui.Center).Gap(4).Children(func() {
 				if a.toolbarPos != "" {
-					ui.Text(c, a.toolbarPos).FontSize(13).TextColor(textSecondary)
+					ui.Text(c, a.toolbarPos).FontSize(13).TextColor(pal.TextSecondary)
 				}
 				def := a.toolbarDef
 				if def == "" {
@@ -81,7 +88,7 @@ func (a *app) toolbarView(c *ui.Context) {
 				if len([]rune(def)) > 16 {
 					def = string([]rune(def)[:16]) + "…"
 				}
-				ui.Text(c, def).FontSize(13).TextColor(textPrimary).SingleLine()
+				ui.Text(c, def).FontSize(13).TextColor(pal.TextPrimary).SingleLine()
 			})
 		})
 		return
@@ -98,7 +105,7 @@ func (a *app) toolbarView(c *ui.Context) {
 
 	btn.Children(func() {
 		ui.Box(c).Width(20).Height(20).Justify(ui.Center).AlignItems(ui.Center).Children(func() {
-			ui.Icon(c, iconTranslate).TextColor(accent)
+			ui.Icon(c, iconTranslate).TextColor(pal.Accent)
 		})
 	})
 }
@@ -128,7 +135,7 @@ func (a *app) showSelectionToolbar(text string, p mygo.Point) {
 
 	mode := a.getTriggerMode()
 	// If trigger mode is direct popup, marshal to UI thread and open popup
-	if mode == "直接弹出完整翻译" {
+	if mode == triggerModePopup {
 		if a.popup != nil {
 			a.popup.Update(func() {
 				a.hideSelectionToolbar()
@@ -153,15 +160,17 @@ func (a *app) showSelectionToolbar(text string, p mygo.Point) {
 		}
 
 		// Determine if bubble mode
-		isBubble := a.getTriggerMode() == "取词即译气泡"
+		isBubble := a.getTriggerMode() == triggerModeBubble
 		a.toolbarIsBubble = isBubble
 
 		if isBubble {
-			info := lookupWord(text)
+			info, found := lookupWord(text)
 			targetLang := effectiveTarget(a.cfg.TargetLang, text)
-			if targetLang != "简体中文" {
-				info.Def = "查询中…"
-				info.Pos = "释义"
+			// The offline dictionary only covers Chinese-bound lookups of
+			// words it knows; everything else resolves online.
+			pending := !found || targetLang != "简体中文"
+			if pending {
+				info = wordInfo{Word: text, Phonetic: "/en/", Pos: "释义"}
 			}
 			a.toolbarWord = info.Word
 			a.toolbarPhonetic = info.Phonetic
@@ -170,18 +179,20 @@ func (a *app) showSelectionToolbar(text string, p mygo.Point) {
 
 			a.toolbar.SetSize(224, 76)
 
-			// If definition is query fallback, trigger async quick translation
-			if info.Def == "查询中…" {
+			if pending {
 				ctx, cancel := context.WithCancel(context.Background())
 				a.bubbleCancel = cancel
 				a.bubbleReqID++
 				reqID := a.bubbleReqID
 
+				// Snapshot the config on the UI thread: the goroutine below
+				// must not read a.cfg, which saveSettings replaces.
+				cfg := a.cfg
+				cfg.TargetLang = targetLang
+
 				go func(targetText string, id int) {
-					cfg := a.cfg
-					cfg.TargetLang = targetLang
 					var b strings.Builder
-					err := a.translateInputText(ctx, cfg, targetText, func(delta string) {
+					err := translateWithFallback(ctx, cfg, cfg.enabledProviders(false), textMessages(cfg, targetText), targetText, nil, func(delta string) {
 						b.WriteString(delta)
 					})
 					res := strings.TrimSpace(b.String())

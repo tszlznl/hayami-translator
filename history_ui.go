@@ -10,11 +10,11 @@ import (
 // historyView lists past translations, newest first, and opens one in the
 // popup where it can be copied again.
 func (a *app) historyView(c *ui.Context) {
-	t := c.Theme()
+	t := fluentTheme(c)
 	winW, _ := c.Size()
-	bg, surface, cardBg, border, textPrimary, textSecondary, accent, footerBg := win11Theme(t)
+	pal := win11Theme(t)
 
-	c.Root().Background(bg)
+	c.Root().Background(pal.Bg)
 
 	padH := float32(20)
 	if winW < 540 {
@@ -25,12 +25,12 @@ func (a *app) historyView(c *ui.Context) {
 		// Header Bar
 		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 			ui.Column(c).Gap(2).Children(func() {
-				ui.Text(c, "历史记录").FontSize(22).Bold().TextColor(textPrimary)
-				ui.Text(c, "点击任意记录可在浮窗中查看并复制").FontSize(11).TextColor(textSecondary)
+				ui.Text(c, "历史记录").FontSize(22).Bold().TextColor(pal.TextPrimary)
+				ui.Text(c, "点击任意记录可在浮窗中查看并复制").FontSize(11).TextColor(pal.TextSecondary)
 			})
 			ui.Spacer(c)
 			ui.Badge(c, fmt.Sprintf("%d 条", len(a.hist))).
-				Background(accent.Alpha(0.12)).TextColor(accent)
+				Background(pal.Accent.Alpha(0.12)).TextColor(pal.Accent)
 			if ui.Button(c, "刷新").Tooltip("重新加载历史记录").Clicked() {
 				a.reloadHistory()
 			}
@@ -51,19 +51,19 @@ func (a *app) historyView(c *ui.Context) {
 
 		// History List
 		if len(a.hist) == 0 {
-			ui.Column(c).Grow(1).Radius(6).Border(1, border).
-				Background(cardBg).Justify(ui.Center).AlignItems(ui.Center).
+			ui.Column(c).Grow(1).Radius(6).Border(1, pal.Border).
+				Background(pal.Card).Justify(ui.Center).AlignItems(ui.Center).
 				Gap(6).Padding(24).Children(func() {
 				if a.histQuery != "" {
-					ui.Text(c, "没有匹配的记录").Bold().TextColor(textPrimary)
+					ui.Text(c, "没有匹配的记录").Bold().TextColor(pal.TextPrimary)
 					ui.Text(c, "试试更短的关键词，或清除搜索查看全部。").
-						FontSize(12).TextColor(textSecondary)
+						FontSize(12).TextColor(pal.TextSecondary)
 				} else if a.histStatus != "" {
 					ui.Text(c, a.histStatus).Bold().TextColor(statusColor(t, a.histStatus))
 				} else {
-					ui.Text(c, "还没有历史记录").Bold().TextColor(textPrimary)
+					ui.Text(c, "还没有历史记录").Bold().TextColor(pal.TextPrimary)
 					ui.Text(c, "完成一次翻译后会自动保存在这里。").
-						FontSize(12).TextColor(textSecondary)
+						FontSize(12).TextColor(pal.TextSecondary)
 				}
 			})
 		} else {
@@ -76,7 +76,7 @@ func (a *app) historyView(c *ui.Context) {
 			ui.List(c, &a.histList, len(a.hist), func(i int) {
 				e := a.hist[i]
 				row := ui.Row(c).Gap(10).Padding(10, 12).Radius(6).
-					Background(surface).Border(1, border).
+					Background(pal.Surface).Border(1, pal.Border).
 					Cursor(ui.CursorPointer)
 				if row.Hovered() {
 					row.Background(ui.RGBA(0, 0, 0, 0.04))
@@ -88,18 +88,18 @@ func (a *app) historyView(c *ui.Context) {
 							title = "截图翻译"
 						}
 						ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-							ui.Text(c, title).SingleLine().Bold().TextColor(textPrimary)
+							ui.Text(c, title).SingleLine().Bold().TextColor(pal.TextPrimary)
 							if e.Mode == "image" {
-								ui.Badge(c, "截图").Background(accent.Alpha(0.12)).TextColor(accent)
+								ui.Badge(c, "截图").Background(pal.Accent.Alpha(0.12)).TextColor(pal.Accent)
 							}
 						})
 						ui.Text(c, oneLine(e.Result, 180)).FontSize(12).
-							TextColor(textSecondary).SingleLine()
+							TextColor(pal.TextSecondary).SingleLine()
 					})
 					ui.Column(c).Shrink(0).Gap(3).AlignItems(ui.End).Children(func() {
-						ui.Text(c, e.Target).FontSize(11).TextColor(accent).SingleLine()
+						ui.Text(c, e.Target).FontSize(11).TextColor(pal.Accent).SingleLine()
 						ui.Text(c, e.CreatedAt.Format("01-02 15:04")).
-							FontSize(11).TextColor(textSecondary)
+							FontSize(11).TextColor(pal.TextSecondary)
 					})
 				})
 			}).Grow(1)
@@ -107,7 +107,7 @@ func (a *app) historyView(c *ui.Context) {
 
 		// Bottom Action Bar
 		ui.Row(c).Height(38).Gap(8).AlignItems(ui.Center).
-			Background(footerBg).Radius(4).Padding(0, 8).Children(func() {
+			Background(pal.Footer).Radius(4).Padding(0, 8).Children(func() {
 			if a.histStatus != "" && len(a.hist) > 0 {
 				ui.Text(c, a.histStatus).FontSize(12).
 					TextColor(statusColor(t, a.histStatus)).SingleLine().Shrink(1)

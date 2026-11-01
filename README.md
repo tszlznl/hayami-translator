@@ -21,7 +21,7 @@
   - `Ctrl+Alt+T`：快速翻译当前选中文本；若未选中文本则在光标旁呼出主翻译窗口。
   - `Ctrl+Alt+I`：独立双栏输入翻译窗口（支持自适应双栏、源/目标语种切换与实时流式输出）。
   - `Alt+Shift+S`：区域截图快速翻译（调用系统截屏框选屏幕，使用视觉模型识别并翻译）。
-- 🔊 **Windows SAPI 语音朗读 (TTS)**：内置原生语音发音支持，支持手动点击发音、翻译完成自动朗读，并支持随时打断与重播。
+- 🔊 **Windows SAPI 语音朗读 (TTS)**：内置原生语音发音支持，点击朗读按钮手动发音，并支持随时打断与重播。
 - 🤖 **多引擎翻译支持**：
   - **OpenAI 兼容协议**：支持 OpenAI (GPT-4o / GPT-4o-mini)、DeepSeek、Moonshot (Kimi)、通义千问 (Qwen)、Ollama 本地大模型及任意自定义兼容网关。
   - **Azure 翻译**：集成微软 Azure Cognitive Services 翻译服务。

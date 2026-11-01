@@ -5,12 +5,21 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/egoist/mygo"
 )
 
 const apiKeySecret = "api-key"
+
+// Selection trigger modes, shared by the settings page, the tray and the
+// toolbar itself.
+const (
+	triggerModeIcon   = "显示图标，点击翻译"
+	triggerModeBubble = "取词即译气泡"
+	triggerModePopup  = "直接弹出完整翻译"
+)
 
 // Config is everything the app remembers between runs. The API key is not
 // part of it: it lives in the system's credential store.
@@ -25,7 +34,6 @@ type Config struct {
 	InputHotkey      string  `json:"inputHotkey,omitempty"`
 	Temperature      float64 `json:"temperature"`
 	MaxTokens        int     `json:"maxTokens"`
-	AutoSpeak        bool    `json:"autoSpeak,omitempty"`
 	PopupPinned      bool    `json:"popupPinned,omitempty"`
 	TriggerMode      string  `json:"triggerMode,omitempty"`
 
@@ -58,11 +66,23 @@ func defaultConfig() Config {
 		Temperature:      0.3,
 		MaxTokens:        2048,
 		PopupPinned:      false,
-		TriggerMode:      "显示图标，点击翻译",
+		TriggerMode:      triggerModeIcon,
 	}
 	cfg.Providers = []Provider{defaultOpenAIProvider(cfg.BaseURL, cfg.Model)}
 	cfg.ProvidersConfigured = true
 	return cfg
+}
+
+// sameConfig reports whether two configs are equivalent, treating a nil and
+// an empty provider list alike: both mean "no providers".
+func (c Config) sameConfig(o Config) bool {
+	if len(c.Providers) == 0 {
+		c.Providers = nil
+	}
+	if len(o.Providers) == 0 {
+		o.Providers = nil
+	}
+	return reflect.DeepEqual(c, o)
 }
 
 func (c Config) clone() Config {

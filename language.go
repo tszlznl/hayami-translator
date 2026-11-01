@@ -45,6 +45,8 @@ func detectLanguageName(text string) string {
 	}
 	return "自动检测"
 }
+
+// isChineseSource is a local heuristic so the target is known before the
 // request is sent. Kana or Hangul means Japanese/Korean, even when the text
 // contains Han characters. Mixed Chinese with a few English terms still
 // counts as Chinese.

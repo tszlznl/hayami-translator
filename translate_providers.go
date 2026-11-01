@@ -29,6 +29,49 @@ func translateWithProvider(ctx context.Context, cfg Config, p Provider, key stri
 	}
 }
 
+// translateWithFallback tries the given providers in priority order until one
+// translates the whole text. onProvider, when not nil, runs before each
+// attempt (to label the engine in the UI); onDelta receives the translation
+// incrementally. A service that already emitted output is never followed by
+// another, so partial results are not concatenated.
+func translateWithFallback(ctx context.Context, cfg Config, providers []Provider, messages []chatMessage, text string, onProvider func(Provider), onDelta func(string)) error {
+	var lastErr error
+	for _, p := range providers {
+		if ctx.Err() != nil {
+			break
+		}
+		key := p.Key
+		if !providerConfigured(p, key) {
+			continue
+		}
+		if onProvider != nil {
+			onProvider(p)
+		}
+		emitted := false
+		err := translateWithProvider(ctx, cfg, p, key, messages, text, func(delta string) {
+			emitted = true
+			onDelta(delta)
+		})
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			lastErr = ctx.Err()
+			break
+		}
+		lastErr = err
+		if emitted {
+			// A service that already produced text is not silently
+			// replaced by another one; keep the partial result.
+			return err
+		}
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("没有可用的翻译服务")
+}
+
 func azureRequestURL(p Provider, target string) (string, error) {
 	endpoint := strings.TrimSpace(p.Endpoint)
 	if endpoint == "" {

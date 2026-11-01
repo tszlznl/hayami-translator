@@ -28,6 +28,11 @@ type providerResult struct {
 	MD        *markdown.Options
 }
 
+type trayController interface {
+	SetMenu(*mygo.Menu)
+	Destroy()
+}
+
 type app struct {
 	cfg          Config
 	providerName string
@@ -38,7 +43,7 @@ type app struct {
 	historyWin *mygo.Window
 	toolbar    *mygo.Window
 	inputWin   *mygo.Window
-	tray       *mygo.Tray
+	tray       trayController
 	hotkeys    []string
 	hotkeyErr  string
 
@@ -245,14 +250,26 @@ func (a *app) getTriggerMode() string {
 	if a.cfg.TriggerMode != "" {
 		return a.cfg.TriggerMode
 	}
-	return "显示图标，点击翻译"
+	return triggerModeIcon
 }
 
 func (a *app) setTriggerMode(m string) {
 	if m == "" {
-		m = "显示图标，点击翻译"
+		m = triggerModeIcon
 	}
 	a.triggerMode.Store(&m)
+}
+
+// engineLabel names the engine in the popup and input window footers: the
+// active provider, else the legacy model field, else the built-in label.
+func (a *app) engineLabel() string {
+	if a.providerName != "" {
+		return a.providerName
+	}
+	if a.cfg.Model != "" {
+		return a.cfg.Model
+	}
+	return "Microsoft Translator"
 }
 
 func (a *app) inputHotkeyLabel() string {
@@ -261,21 +278,6 @@ func (a *app) inputHotkeyLabel() string {
 		return "Ctrl+Alt+I"
 	}
 	return h
-}
-
-func cleanSpeechText(s string) string {
-	lines := strings.Split(s, "\n")
-	var kept []string
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "---") {
-			continue
-		}
-		if trimmed != "" {
-			kept = append(kept, trimmed)
-		}
-	}
-	return strings.Join(kept, " ")
 }
 
 func (a *app) createWindows() {
@@ -448,7 +450,7 @@ func (a *app) refreshSettingsWindow() {
 func (a *app) showSettings() {
 	a.form = a.cfg.clone()
 	if a.form.TriggerMode == "" {
-		a.form.TriggerMode = "显示图标，点击翻译"
+		a.form.TriggerMode = triggerModeIcon
 	}
 	a.toolbarEnabled = !a.cfg.DisableSelectionToolbar
 	a.setTriggerMode(a.cfg.TriggerMode)
@@ -525,11 +527,15 @@ func (a *app) refreshTrayMenu() {
 	if a.tray == nil {
 		return
 	}
+	a.tray.SetMenu(a.trayMenu())
+}
+
+func (a *app) trayMenu() *mygo.Menu {
 	toolbarStatus := "已开启"
 	if !a.toolbarEnabled {
 		toolbarStatus = "已关闭"
 	}
-	a.tray.SetMenu(mygo.NewMenu([]*mygo.MenuItem{
+	return mygo.NewMenu([]*mygo.MenuItem{
 		{Label: "划词翻译 (" + toolbarStatus + ")", Click: func(*mygo.MenuItem, *mygo.Window) {
 			old := a.toolbarEnabled
 			a.toolbarEnabled = !old
@@ -549,6 +555,7 @@ func (a *app) refreshTrayMenu() {
 			a.refreshTrayMenu()
 			a.refreshSettingsWindow()
 		}},
+		{Label: "显示翻译窗口", Click: func(*mygo.MenuItem, *mygo.Window) { a.showCenterPopup(true) }},
 		{Label: "翻译选中文本", Accelerator: a.cfg.Hotkey, Click: func(*mygo.MenuItem, *mygo.Window) { a.translateSelection() }},
 		{Label: "输入翻译…", Accelerator: a.inputHotkeyLabel(), Click: func(*mygo.MenuItem, *mygo.Window) { a.showInputWindow() }},
 		{Label: "截图翻译", Accelerator: a.cfg.ScreenshotHotkey, Click: func(*mygo.MenuItem, *mygo.Window) { a.translateScreenshot() }},
@@ -556,8 +563,26 @@ func (a *app) refreshTrayMenu() {
 		{Label: "设置…", Click: func(*mygo.MenuItem, *mygo.Window) { a.showSettings() }},
 		{Label: "历史记录…", Click: func(*mygo.MenuItem, *mygo.Window) { a.showHistory() }},
 		mygo.Separator(),
+		{Label: "开机启动", Type: mygo.MenuItemCheckbox, ID: "login", Checked: a.openAtLogin,
+			Click: func(it *mygo.MenuItem, _ *mygo.Window) {
+				if err := a.updateOpenAtLogin(it.Checked, mygo.App.SetOpenAtLogin); err != nil {
+					log.Print("setting open at login: ", err)
+					a.refreshTrayMenu()
+					return
+				}
+				a.refreshSettingsWindow()
+			}},
 		{Role: mygo.RoleQuit, Label: "退出", Click: func(*mygo.MenuItem, *mygo.Window) { a.quit() }},
-	}))
+	})
+}
+
+func (a *app) updateOpenAtLogin(enabled bool, apply func(bool) error) error {
+	if err := apply(enabled); err != nil {
+		return err
+	}
+	a.openAtLogin = enabled
+	a.refreshTrayMenu()
+	return nil
 }
 
 func (a *app) quit() {
@@ -813,9 +838,6 @@ func (a *app) startTranslation() {
 				if strings.TrimSpace(result) == "" {
 					return
 				}
-				if a.cfg.AutoSpeak {
-					speakText(cleanSpeechText(result))
-				}
 				entry := historyEntry{
 					CreatedAt: timeNow(),
 					Source:    sourceText,
@@ -851,73 +873,40 @@ func (a *app) startTranslation() {
 			})
 		}
 		last := time.Now()
-		var lastErr error
 
-		for _, p := range providers {
-			if ctx.Err() != nil {
-				break
-			}
-			key := p.Key
-			if !providerConfigured(p, key) {
-				lastErr = fmt.Errorf("%s 未配置完整", p.Name)
-				continue
-			}
+		err := translateWithFallback(ctx, cfg, providers, messages, sourceText, func(p Provider) {
+			pending.Reset()
 			a.popup.Update(func() {
 				if a.reqID == id {
 					a.providerName = providerLabel(p)
-				}
-			})
-			pending.Reset()
-			emitted := false
-			err := translateWithProvider(ctx, cfg, p, key, messages, sourceText, func(delta string) {
-				emitted = true
-				pending.WriteString(delta)
-				// Repaint at most every 30ms instead of once per token.
-				if time.Since(last) >= 30*time.Millisecond {
-					flush()
-					last = time.Now()
-				}
-			})
-			flush()
-			if err == nil {
-				lastErr = nil
-				break
-			}
-			if ctx.Err() != nil {
-				lastErr = ctx.Err()
-				break
-			}
-			lastErr = err
-			if emitted {
-				// A service that already produced text is not silently
-				// replaced by another one; keep the partial result.
-				break
-			}
-			a.popup.Update(func() {
-				if a.reqID == id {
 					a.result = ""
 				}
 			})
-		}
+		}, func(delta string) {
+			pending.WriteString(delta)
+			// Repaint at most every 30ms instead of once per token.
+			if time.Since(last) >= 30*time.Millisecond {
+				flush()
+				last = time.Now()
+			}
+		})
+		flush()
 
 		a.popup.Update(func() {
 			if a.reqID != id {
 				return
 			}
 			a.streaming = false
-			if lastErr != nil && ctx.Err() == nil {
+			if err != nil && ctx.Err() == nil {
 				if strings.TrimSpace(a.result) == "" {
-					a.errText = lastErr.Error()
+					a.errText = err.Error()
 				} else {
-					a.status = "部分失败：" + lastErr.Error()
+					a.status = "部分失败：" + err.Error()
 				}
 			}
 			result := a.result
 			if strings.TrimSpace(result) == "" {
 				return
-			}
-			if a.cfg.AutoSpeak {
-				speakText(cleanSpeechText(result))
 			}
 			entry := historyEntry{
 				CreatedAt: timeNow(),

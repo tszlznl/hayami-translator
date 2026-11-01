@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -15,6 +16,8 @@ import (
 	"github.com/egoist/mygo/transfer"
 	"golang.org/x/sys/windows"
 )
+
+var errClipboardSnapshot = errors.New("无法保存当前剪贴板，已取消划词翻译")
 
 const (
 	vkShift   = 0x10
@@ -99,11 +102,20 @@ func sendCtrlC() bool {
 func readSelectedText() (string, error) {
 	selectionReadMu.Lock()
 	defer selectionReadMu.Unlock()
+	return readSelectedTextWith(saveClipboard, copySelectedText)
+}
 
-	saved, saveErr := mygo.Clipboard.Read()
-	if saveErr != nil {
-		return "", fmt.Errorf("读取当前剪贴板失败：%w", saveErr)
+// readSelectedTextWith refuses to touch the clipboard unless the previous
+// contents can be restored afterwards.
+func readSelectedTextWith(save func() (transfer.Data, bool), copy func(transfer.Data) (string, error)) (string, error) {
+	saved, restorable := save()
+	if !restorable {
+		return "", errClipboardSnapshot
 	}
+	return copy(saved)
+}
+
+func copySelectedText(saved transfer.Data) (string, error) {
 	copied := false
 	defer func() {
 		if !copied {
@@ -135,6 +147,44 @@ func readSelectedText() (string, error) {
 	time.Sleep(30 * time.Millisecond)
 
 	return strings.TrimSpace(mygo.Clipboard.ReadText()), nil
+}
+
+// saveClipboard snapshots the clipboard for restoreClipboard. A clipboard
+// that offers one unreadable format, such as the EnterpriseDataProtectionId
+// Explorer writes, fails a whole Clipboard.Read. Skip only formats known to
+// be safe to omit; an unreadable unknown format means the rest could not be
+// restored faithfully, so selection translation aborts instead.
+func saveClipboard() (transfer.Data, bool) {
+	d, err := mygo.Clipboard.Read()
+	if err == nil {
+		return d, true
+	}
+	var reps []transfer.Representation
+	for _, f := range mygo.Clipboard.Formats() {
+		b, readErr := mygo.Clipboard.ReadFormat(f)
+		if readErr != nil {
+			if canDropClipboardFormat(f) {
+				continue
+			}
+			log.Printf("保存剪贴板格式 %s 失败，已取消划词: %v", f, readErr)
+			return transfer.Data{}, false
+		}
+		reps = append(reps, transfer.Bytes(f, b))
+	}
+	if len(reps) == 0 {
+		log.Printf("保存剪贴板失败，已取消划词: %v", err)
+		return transfer.Data{}, false
+	}
+	return transfer.New(transfer.NewItem(reps...)), true
+}
+
+func canDropClipboardFormat(f transfer.Format) bool {
+	switch strings.ToLower(string(f)) {
+	case "enterprisedataprotection", "enterprisedataprotectionid":
+		return true
+	default:
+		return false
+	}
 }
 
 func restoreClipboard(saved transfer.Data) error {

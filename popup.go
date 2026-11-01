@@ -19,11 +19,11 @@ var targetLanguages = []string{
 
 // popupView renders the Windows 11 Fluent floating translation card with responsive layout.
 func (a *app) popupView(c *ui.Context) {
-	t := c.Theme()
+	t := fluentTheme(c)
 	winW, _ := c.Size()
-	_, surface, _, border, textPrimary, textSecondary, accent, footerBg := win11Theme(t)
+	pal := win11Theme(t)
 
-	c.Root().Background(surface).Border(1, border).Radius(8).
+	c.Root().Background(pal.Surface).Border(1, pal.Border).Radius(8).
 		Shadow(0, 8, 20, 0, ui.RGBA(0, 0, 0, 0.18))
 	c.OnShortcut(0, ui.KeyEscape, func() { a.hidePopup() })
 	c.OnShortcut(ui.Ctrl, ui.KeyEnter, func() { a.startTranslation() })
@@ -41,7 +41,7 @@ func (a *app) popupView(c *ui.Context) {
 			} else if strings.TrimSpace(a.source) != "" {
 				srcDisplay = detectLanguageName(a.source)
 			}
-			ui.Text(c, srcDisplay).FontSize(12).TextColor(textSecondary).Shrink(1)
+			ui.Text(c, srcDisplay).FontSize(12).TextColor(pal.TextSecondary).Shrink(1)
 
 			ui.Box(c).Width(14).Height(14).AlignItems(ui.Center).Justify(ui.Center).Children(func() {
 				ui.Icon(c, iconArrowRight)
@@ -77,7 +77,7 @@ func (a *app) popupView(c *ui.Context) {
 				}
 			}
 			targetBtn.Children(func() {
-				ui.Text(c, displayLabel).Bold().FontSize(12).TextColor(accent).SingleLine()
+				ui.Text(c, displayLabel).Bold().FontSize(12).TextColor(pal.Accent).SingleLine()
 			})
 
 			ui.Spacer(c)
@@ -90,7 +90,7 @@ func (a *app) popupView(c *ui.Context) {
 			pinBtn := ui.ButtonBase(c).Width(28).Height(28).Radius(4).
 				Justify(ui.Center).AlignItems(ui.Center).Tooltip(pinTip)
 			if a.popupPinned {
-				pinBtn.Background(accent.Alpha(0.14))
+				pinBtn.Background(pal.Accent.Alpha(0.14))
 			}
 			if pinBtn.Clicked() {
 				a.popupPinned = !a.popupPinned
@@ -119,7 +119,7 @@ func (a *app) popupView(c *ui.Context) {
 		ui.Column(c).Grow(1).Padding(4, padH, 8, padH).Gap(6).Children(func() {
 			if a.hasImage {
 				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-					ui.Badge(c, "视觉模型截图识别").Background(accent.Alpha(0.12)).TextColor(accent)
+					ui.Badge(c, "视觉模型截图识别").Background(pal.Accent.Alpha(0.12)).TextColor(pal.Accent)
 				})
 			} else if strings.TrimSpace(a.source) == "" {
 				ui.TextArea(c, &a.source).
@@ -139,7 +139,7 @@ func (a *app) popupView(c *ui.Context) {
 				if len([]rune(srcText)) > maxRune {
 					srcText = string([]rune(srcText)[:maxRune]) + "…"
 				}
-				ui.Text(c, srcText).FontSize(12).TextColor(textSecondary).SingleLine()
+				ui.Text(c, srcText).FontSize(12).TextColor(pal.TextSecondary).SingleLine()
 			}
 
 			if a.streaming && !a.multiEngine {
@@ -151,14 +151,14 @@ func (a *app) popupView(c *ui.Context) {
 				case a.errText != "":
 					ui.Column(c).Gap(4).Children(func() {
 						ui.Text(c, a.errText).TextColor(t.Danger).FontSize(13)
-						ui.Text(c, "按 Ctrl+Enter 重试，或检查设置里的翻译服务。").FontSize(11).TextColor(textSecondary)
+						ui.Text(c, "按 Ctrl+Enter 重试，或检查设置里的翻译服务。").FontSize(11).TextColor(pal.TextSecondary)
 					})
 				case a.multiEngine && len(a.results) > 0:
 					ui.Column(c).Gap(8).Children(func() {
 						for i := range a.results {
 							r := &a.results[i]
 							ui.Column(c.Key(r.ID)).Gap(4).Padding(8, 10).Radius(6).
-								Background(t.Background).Border(1, border).Children(func() {
+								Background(t.Background).Border(1, pal.Border).Children(func() {
 								ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
 									ui.Text(c, r.Name).Bold().FontSize(12)
 									if r.Streaming {
@@ -184,7 +184,7 @@ func (a *app) popupView(c *ui.Context) {
 								} else if r.ErrText != "" {
 									ui.Text(c, r.ErrText).TextColor(t.Danger).FontSize(12)
 								} else if r.Streaming {
-									ui.Text(c, "正在请求…").FontSize(12).TextColor(textSecondary)
+									ui.Text(c, "正在请求…").FontSize(12).TextColor(pal.TextSecondary)
 								}
 							})
 						}
@@ -195,7 +195,7 @@ func (a *app) popupView(c *ui.Context) {
 						if a.result != "" {
 							markdown.Stream(c, a.result, &a.md)
 						} else {
-							ui.Text(c, "正在翻译…").FontSize(14).TextColor(textSecondary)
+							ui.Text(c, "正在翻译…").FontSize(14).TextColor(pal.TextSecondary)
 						}
 					})
 				case a.result != "":
@@ -206,45 +206,40 @@ func (a *app) popupView(c *ui.Context) {
 						fontSize = 16
 					}
 					if !strings.Contains(resText, "\n") && !strings.Contains(resText, "#") {
-						ui.Text(c, resText).Bold().FontSize(fontSize).TextColor(textPrimary)
+						ui.Text(c, resText).Bold().FontSize(fontSize).TextColor(pal.TextPrimary)
 					} else {
 						markdown.View(c, resText, &a.md)
 					}
 				default:
 					if strings.TrimSpace(a.source) != "" {
-						ui.Text(c, "按 Ctrl+Enter 立即翻译").FontSize(13).TextColor(textSecondary)
+						ui.Text(c, "按 Ctrl+Enter 立即翻译").FontSize(13).TextColor(pal.TextSecondary)
 					}
 				}
 			})
 
 			// Engine info line
-			engineLabel := a.providerName
+			engineLabel := a.engineLabel()
 			if a.multiEngine && len(a.results) > 0 {
 				engineLabel = fmt.Sprintf("多引擎并发 (%d 个服务)", len(a.results))
-			} else if engineLabel == "" {
-				engineLabel = a.cfg.Model
 			}
-			if engineLabel == "" {
-				engineLabel = "Microsoft Translator"
-			}
-			ui.Text(c, "引擎："+engineLabel).FontSize(11).TextColor(textSecondary).SingleLine()
+			ui.Text(c, "引擎："+engineLabel).FontSize(11).TextColor(pal.TextSecondary).SingleLine()
 		})
 
 		// Bottom Action Bar
 		ui.Row(c).Height(38).Padding(4, padH).Gap(4).AlignItems(ui.Center).
-			BorderWidth(1, 0, 0, 0).BorderColor(border).
-			Background(footerBg).Radius(0, 0, 8, 8).Children(func() {
+			BorderWidth(1, 0, 0, 0).BorderColor(pal.Border).
+			Background(pal.Footer).Radius(0, 0, 8, 8).Children(func() {
 			copyBtn := win11IconButton(c, iconCopy, "复制译文")
 			if copyBtn.Clicked() {
 				a.copyResult()
 			}
 
-			audioBtn := win11IconButton(c, iconAudio, "朗读译文")
+			audioBtn := win11IconButton(c, iconAudio, "朗读（朗读中点击停止）")
 			if audioBtn.Clicked() {
-				if a.result != "" {
-					speakText(a.result)
-				} else if a.source != "" {
-					speakText(a.source)
+				if isSpeaking() {
+					stopSpeaking()
+				} else {
+					speakResult(a.result, a.source)
 				}
 			}
 

@@ -12,11 +12,11 @@ import (
 )
 
 func (a *app) inputWindowView(c *ui.Context) {
-	t := c.Theme()
+	t := fluentTheme(c)
 	winW, _ := c.Size()
-	bg, surface, cardBg, border, textPrimary, textSecondary, _, _ := win11Theme(t)
+	pal := win11Theme(t)
 
-	c.Root().Background(bg)
+	c.Root().Background(pal.Bg)
 	c.OnShortcut(ui.Ctrl, ui.KeyEnter, func() { a.startInputTranslation() })
 	c.OnShortcut(0, ui.KeyEscape, func() {
 		if a.inputCancel != nil {
@@ -42,7 +42,7 @@ func (a *app) inputWindowView(c *ui.Context) {
 	ui.Column(c).Fill().Children(func() {
 		// Window Title / Top Bar
 		ui.Row(c).Height(38).Padding(0, padH).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "输入翻译").FontSize(13).Bold().TextColor(textPrimary)
+			ui.Text(c, "输入翻译").FontSize(13).Bold().TextColor(pal.TextPrimary)
 			ui.Spacer(c)
 			if ui.Button(c, "历史记录").Tooltip("查看历史翻译").Clicked() {
 				a.showHistory()
@@ -84,8 +84,8 @@ func (a *app) inputWindowView(c *ui.Context) {
 
 		// Dual-Pane Translation Workspace (Responsive Row or Column)
 		renderInputPane := func() {
-			ui.Column(c).Grow(1).Radius(6).Background(surface).Border(1, border).
-				BorderWidth(1, 1, 2, 1).BorderColor(border).
+			ui.Column(c).Grow(1).Radius(6).Background(pal.Surface).Border(1, pal.Border).
+				BorderWidth(1, 1, 2, 1).BorderColor(pal.Border).
 				Padding(12).Children(func() {
 				ui.TextArea(c, &a.inputSource).
 					Bind(&a.inputWindowInputHandle).
@@ -94,7 +94,7 @@ func (a *app) inputWindowView(c *ui.Context) {
 
 				ui.Row(c).AlignItems(ui.Center).Children(func() {
 					if n := len([]rune(a.inputSource)); n > 0 {
-						ui.Text(c, fmt.Sprintf("%d 字符", n)).FontSize(11).TextColor(textSecondary)
+						ui.Text(c, fmt.Sprintf("%d 字符", n)).FontSize(11).TextColor(pal.TextSecondary)
 					}
 					ui.Spacer(c)
 					if strings.TrimSpace(a.inputSource) != "" {
@@ -112,7 +112,7 @@ func (a *app) inputWindowView(c *ui.Context) {
 		}
 
 		renderOutputPane := func() {
-			ui.Column(c).Grow(1).Radius(6).Background(cardBg).Border(1, border).
+			ui.Column(c).Grow(1).Radius(6).Background(pal.Card).Border(1, pal.Border).
 				Padding(12).Children(func() {
 				ui.Scroll(c).Grow(1).Children(func() {
 					switch {
@@ -122,7 +122,7 @@ func (a *app) inputWindowView(c *ui.Context) {
 							if a.inputResult != "" {
 								markdown.Stream(c, a.inputResult, &a.md)
 							} else {
-								ui.Text(c, "正在翻译…").FontSize(14).TextColor(textSecondary)
+								ui.Text(c, "正在翻译…").FontSize(14).TextColor(pal.TextSecondary)
 							}
 						})
 					case a.inputResult != "":
@@ -134,21 +134,14 @@ func (a *app) inputWindowView(c *ui.Context) {
 						ui.Text(c, a.inputErr).TextColor(t.Danger).FontSize(13)
 					default:
 						ui.Column(c).Gap(6).Padding(20, 0).AlignItems(ui.Center).Children(func() {
-							ui.Text(c, "译文将显示在这里").Bold().TextColor(textSecondary)
-							ui.Text(c, "在左侧输入文本后点击翻译").FontSize(12).TextColor(textSecondary)
+							ui.Text(c, "译文将显示在这里").Bold().TextColor(pal.TextSecondary)
+							ui.Text(c, "在左侧输入文本后点击翻译").FontSize(12).TextColor(pal.TextSecondary)
 						})
 					}
 				})
 
 				ui.Row(c).Height(34).AlignItems(ui.Center).Gap(4).Children(func() {
-					engineName := a.providerName
-					if engineName == "" {
-						engineName = a.cfg.Model
-					}
-					if engineName == "" {
-						engineName = "Microsoft Translator"
-					}
-					ui.Text(c, "引擎："+engineName).FontSize(11).TextColor(textSecondary).SingleLine()
+					ui.Text(c, "引擎："+a.engineLabel()).FontSize(11).TextColor(pal.TextSecondary).SingleLine()
 
 					ui.Spacer(c)
 
@@ -157,12 +150,12 @@ func (a *app) inputWindowView(c *ui.Context) {
 						mygo.Clipboard.WriteText(a.inputResult)
 					}
 
-					audioBtn := win11IconButton(c, iconAudio, "朗读译文")
+					audioBtn := win11IconButton(c, iconAudio, "朗读（朗读中点击停止）")
 					if audioBtn.Clicked() {
-						if strings.TrimSpace(a.inputResult) != "" {
-							speakText(a.inputResult)
-						} else if strings.TrimSpace(a.inputSource) != "" {
-							speakText(a.inputSource)
+						if isSpeaking() {
+							stopSpeaking()
+						} else {
+							speakResult(a.inputResult, a.inputSource)
 						}
 					}
 				})
@@ -219,36 +212,6 @@ func (a *app) swapInputLanguages() {
 	}
 }
 
-func (a *app) translateInputText(ctx context.Context, cfg Config, text string, onDelta func(string)) error {
-	messages := textMessages(cfg, text)
-	providers := cfg.enabledProviders(false)
-	var lastErr error
-	var emitted bool
-	for _, p := range providers {
-		key := p.Key
-		if !providerConfigured(p, key) {
-			continue
-		}
-		emitted = false
-		err := translateWithProvider(ctx, cfg, p, key, messages, text, func(delta string) {
-			emitted = true
-			onDelta(delta)
-		})
-		if err == nil {
-			return nil
-		}
-		if emitted {
-			// A service that already produced output must not be concatenated
-			return err
-		}
-		lastErr = err
-	}
-	if lastErr != nil {
-		return lastErr
-	}
-	return fmt.Errorf("没有可用的翻译服务")
-}
-
 func (a *app) startInputTranslation() {
 	text := strings.TrimSpace(a.inputSource)
 	if text == "" {
@@ -293,7 +256,7 @@ func (a *app) startInputTranslation() {
 			lastFlush = time.Now()
 		}
 
-		err := a.translateInputText(ctx, cfg, text, func(delta string) {
+		err := translateWithFallback(ctx, cfg, cfg.enabledProviders(false), textMessages(cfg, text), text, nil, func(delta string) {
 			pending.WriteString(delta)
 			if time.Since(lastFlush) >= 30*time.Millisecond {
 				flush()
