@@ -7,7 +7,10 @@ import (
 	"github.com/egoist/mygo"
 )
 
-const currentAppIdentifier = "com.hayami.translator"
+const (
+	currentAppIdentifier = "com.hayami.translator"
+	apiKeySecret         = "api-key"
+)
 
 func appSecrets() mygo.SecretsModule {
 	return mygo.Secrets.Service(currentAppIdentifier)

@@ -15,6 +15,7 @@ mygo_windows_*.syso
 # IDEs and editors
 .vscode/
 .idea/
+.qoder/
 *.swp
 *.swo
 *~

@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -28,7 +30,7 @@ var (
 )
 
 // speechPlayback tracks the active read-aloud from the moment it starts, not
-// from when PowerShell creates its process. Cancelling the context also stops
+// from when the speech engine's process starts. Cancelling the context also stops
 // a command whose process has not started yet.
 type speechPlayback struct {
 	mu     sync.Mutex
@@ -100,22 +102,42 @@ func speakResult(result, source string) {
 	speakText(source)
 }
 
-// speakText reads text aloud asynchronously using Windows Speech API
+// speakText reads text aloud asynchronously using the platform speech engine.
 func speakText(text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
 	}
 
-	// Escape single quotes for PowerShell
-	safe := strings.ReplaceAll(text, "'", "''")
-	psScript := fmt.Sprintf("Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak('%s')", safe)
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", psScript)
+	cmd, err := speechCommand(ctx, text)
+	if err != nil {
+		cancel()
+		log.Printf("朗读失败: %v", err)
+		return
+	}
 	speech.begin(cmd, cancel)
 
 	go func() {
-		_ = cmd.Run()
-		speech.done(cmd)
+		defer speech.done(cmd)
+		if err := cmd.Run(); err != nil && ctx.Err() == nil {
+			log.Printf("朗读失败: %v", err)
+		}
 	}()
+}
+
+func speechCommand(ctx context.Context, text string) (*exec.Cmd, error) {
+	switch runtime.GOOS {
+	case "linux":
+		cmd := exec.CommandContext(ctx, "espeak-ng", "--stdin")
+		cmd.Stdin = strings.NewReader(text)
+		return cmd, nil
+	case "windows":
+		// Escape single quotes for PowerShell.
+		safe := strings.ReplaceAll(text, "'", "''")
+		psScript := fmt.Sprintf("Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak('%s')", safe)
+		return exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", psScript), nil
+	default:
+		return nil, fmt.Errorf("当前平台暂不支持朗读")
+	}
 }

@@ -6,7 +6,7 @@ func TestSettingsDirty(t *testing.T) {
 	cfg := defaultConfig()
 	a := &app{
 		cfg:            cfg,
-		form:           cfg.clone(),
+		form:           cfg.Clone(),
 		toolbarEnabled: !cfg.DisableSelectionToolbar,
 	}
 	if a.settingsDirty() {
@@ -18,7 +18,7 @@ func TestSettingsDirty(t *testing.T) {
 		t.Fatal("editing a field should mark the draft dirty")
 	}
 
-	a.form = cfg.clone()
+	a.form = cfg.Clone()
 	if a.settingsDirty() {
 		t.Fatal("restoring the draft should clear the dirty state")
 	}
@@ -66,7 +66,7 @@ func TestNormalizeProvidersKeyTrim(t *testing.T) {
 			{ID: "p1", Kind: providerOpenAI, Key: "  sk-secret-key  \n\t "},
 		},
 	}
-	c.normalizeProviders()
+	c.NormalizeProviders()
 	if c.Providers[0].Key != "sk-secret-key" {
 		t.Fatalf("expected key to be trimmed, got %q", c.Providers[0].Key)
 	}
@@ -76,7 +76,7 @@ func TestToolbarToggleSyncFormDirty(t *testing.T) {
 	cfg := defaultConfig()
 	a := &app{
 		cfg:            cfg,
-		form:           cfg.clone(),
+		form:           cfg.Clone(),
 		toolbarEnabled: !cfg.DisableSelectionToolbar,
 	}
 	if a.settingsDirty() {
@@ -99,10 +99,10 @@ func TestSettingsDirtyWithEmptyProviders(t *testing.T) {
 		ProvidersConfigured: true,
 		Providers:           []Provider{}, // non-nil empty slice
 	}
-	cfg.fillDefaults()
+	cfg.FillDefaults()
 	a := &app{
 		cfg:            cfg,
-		form:           cfg.clone(),
+		form:           cfg.Clone(),
 		toolbarEnabled: !cfg.DisableSelectionToolbar,
 	}
 	if a.settingsDirty() {

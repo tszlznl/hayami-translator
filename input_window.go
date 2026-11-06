@@ -18,15 +18,6 @@ func (a *app) inputWindowView(c *ui.Context) {
 
 	c.Root().Background(pal.Bg)
 	c.OnShortcut(ui.Ctrl, ui.KeyEnter, func() { a.startInputTranslation() })
-	c.OnShortcut(0, ui.KeyEscape, func() {
-		if a.inputCancel != nil {
-			a.inputCancel()
-			a.inputCancel = nil
-		}
-		if a.inputWin != nil {
-			a.inputWin.Hide()
-		}
-	})
 
 	if a.inputWindowNeedFocus {
 		a.inputWindowNeedFocus = false
@@ -39,21 +30,10 @@ func (a *app) inputWindowView(c *ui.Context) {
 	}
 	verticalStack := winW < 640
 
-	ui.Column(c).Fill().Children(func() {
-		// Window Title / Top Bar
-		ui.Row(c).Height(38).Padding(0, padH).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "输入翻译").FontSize(13).Bold().TextColor(pal.TextPrimary)
-			ui.Spacer(c)
-			if ui.Button(c, "历史记录").Tooltip("查看历史翻译").Clicked() {
-				a.showHistory()
-			}
-			if ui.Button(c, "设置").Tooltip("翻译设置").Clicked() {
-				a.showSettings()
-			}
-		})
+	ui.Column(c).Fill().Padding(12, 0, 0, 0).Children(func() {
 
 		// Language Select Bar
-		ui.Row(c).Padding(4, padH).Gap(8).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).Padding(0, padH, 4, padH).Gap(8).AlignItems(ui.Center).Children(func() {
 			if a.inputSourceLang == "" {
 				a.inputSourceLang = "自动检测"
 			}
@@ -84,8 +64,7 @@ func (a *app) inputWindowView(c *ui.Context) {
 
 		// Dual-Pane Translation Workspace (Responsive Row or Column)
 		renderInputPane := func() {
-			ui.Column(c).Grow(1).Radius(6).Background(pal.Surface).Border(1, pal.Border).
-				BorderWidth(1, 1, 2, 1).BorderColor(pal.Border).
+			ui.Column(c).Grow(1).Radius(10).Background(pal.Card).Border(1, pal.Border).
 				Padding(12).Children(func() {
 				ui.TextArea(c, &a.inputSource).
 					Bind(&a.inputWindowInputHandle).
@@ -112,7 +91,7 @@ func (a *app) inputWindowView(c *ui.Context) {
 		}
 
 		renderOutputPane := func() {
-			ui.Column(c).Grow(1).Radius(6).Background(pal.Card).Border(1, pal.Border).
+			ui.Column(c).Grow(1).Radius(10).Background(pal.Card).Border(1, pal.Border).
 				Padding(12).Children(func() {
 				ui.Scroll(c).Grow(1).Children(func() {
 					switch {
@@ -177,9 +156,6 @@ func (a *app) inputWindowView(c *ui.Context) {
 }
 
 func (a *app) showInputWindow() {
-	if a.inputWin == nil {
-		return
-	}
 	if a.inputTargetLang == "" {
 		a.inputTargetLang = a.cfg.TargetLang
 		if a.inputTargetLang == "" {
@@ -187,9 +163,7 @@ func (a *app) showInputWindow() {
 		}
 	}
 	a.inputWindowNeedFocus = true
-	a.inputWin.Center()
-	a.inputWin.Show()
-	a.inputWin.Focus()
+	a.showPanel(panelInput)
 }
 
 func (a *app) swapInputLanguages() {
@@ -246,8 +220,8 @@ func (a *app) startInputTranslation() {
 				return
 			}
 			accum := pending.String()
-			if a.inputWin != nil {
-				a.inputWin.Update(func() {
+			if a.popup != nil {
+				a.popup.Update(func() {
 					if a.inputReqID == reqID {
 						a.inputResult = accum
 					}
@@ -256,7 +230,7 @@ func (a *app) startInputTranslation() {
 			lastFlush = time.Now()
 		}
 
-		err := translateWithFallback(ctx, cfg, cfg.enabledProviders(false), textMessages(cfg, text), text, nil, func(delta string) {
+		err := translateWithFallback(ctx, cfg, cfg.EnabledProviders(false), textMessages(cfg, text), text, nil, func(delta string) {
 			pending.WriteString(delta)
 			if time.Since(lastFlush) >= 30*time.Millisecond {
 				flush()
@@ -264,19 +238,24 @@ func (a *app) startInputTranslation() {
 		})
 		flush()
 
-		if a.inputWin != nil {
-			a.inputWin.Update(func() {
+		if a.popup != nil {
+			a.popup.Update(func() {
 				if a.inputReqID != reqID {
 					return
 				}
 				a.inputStreaming = false
 				if err != nil && pending.Len() == 0 {
 					if ctx.Err() == nil {
-						a.inputErr = "翻译失败：" + err.Error()
+						title, hint := explainError(err)
+						a.inputErr = title
+						if hint != "" {
+							a.inputErr += "。" + hint
+						}
 					}
 				} else if err != nil {
 					if ctx.Err() == nil {
-						a.inputErr = "部分传输中断：" + err.Error()
+						title, _ := explainError(err)
+						a.inputErr = "部分传输中断：" + title
 					}
 				} else {
 					a.inputResult = pending.String()
@@ -290,7 +269,7 @@ func (a *app) startInputTranslation() {
 						Mode:      "input",
 					}
 					go func() {
-						_ = a.store.add(entry)
+						_ = a.store.Add(entry)
 					}()
 				}
 			})

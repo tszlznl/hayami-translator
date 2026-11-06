@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"runtime"
 	"strings"
@@ -95,6 +96,7 @@ var (
 	procGetMessageW         = user32.NewProc("GetMessageW")
 	procPeekMessageW        = user32.NewProc("PeekMessageW")
 	procPostThreadMessageW  = user32.NewProc("PostThreadMessageW")
+	procGetDoubleClickTime  = user32.NewProc("GetDoubleClickTime")
 )
 
 var (
@@ -208,11 +210,29 @@ func runMouseHook(events chan<- mouseEvent, ready chan<- hookStart, done chan<- 
 	procUnhookWindowsHookEx.Call(h)
 }
 
+var hookDebug = os.Getenv("HAYAMI_HOOK_DEBUG") == "1"
+
+// hookLog writes selection gesture diagnostics when HAYAMI_HOOK_DEBUG=1.
+// Windows removes a low-level hook silently, so these lines are the only
+// evidence that the hook still receives events.
+func hookLog(format string, args ...any) {
+	if hookDebug {
+		log.Printf("[hook] "+format, args...)
+	}
+}
+
 func processMouseEvents(a *app, events <-chan mouseEvent) {
+	hookLog("event loop started")
 	var down *dragStart
+	// lastUp keeps the previous click so the next one can be recognized as a
+	// double-click, which selects a word without a drag.
+	var lastUp dragStart
+	var hasLastUp bool
+
 	for ev := range events {
 		switch uint32(ev.message) {
 		case wmLButtonDown:
+			hookLog("down %d,%d", ev.pt.X, ev.pt.Y)
 			// Any new press invalidates a read that is still in flight.
 			dragSeq.Add(1)
 			down = nil
@@ -221,7 +241,6 @@ func processMouseEvents(a *app, events <-chan mouseEvent) {
 				// would cancel the click.
 				continue
 			}
-			a.hideSelectionToolbar()
 			if pointInOurApp(ev.pt) || !selectionToolbarEnabled.Load() {
 				continue
 			}
@@ -234,19 +253,34 @@ func processMouseEvents(a *app, events <-chan mouseEvent) {
 		case wmLButtonUp:
 			start := down
 			down = nil
+			upAt := time.Now()
+			double := isDoubleClick(
+				ev.pt.X-lastUp.pt.X, ev.pt.Y-lastUp.pt.Y,
+				upAt.Sub(lastUp.at), doubleClickWindow(), hasLastUp)
+			hasLastUp = false
+
 			if start == nil || !selectionToolbarEnabled.Load() {
+				hookLog("up ignored start=%v enabled=%v", start != nil, selectionToolbarEnabled.Load())
 				continue
 			}
-			if time.Since(start.at) < 40*time.Millisecond || !dragged(start.pt, ev.pt) {
+			isDrag := time.Since(start.at) >= 40*time.Millisecond && dragged(start.pt, ev.pt)
+			if !isDrag && !double {
+				lastUp = dragStart{pt: ev.pt, at: upAt}
+				hasLastUp = true
 				continue
 			}
+			hookLog("gesture drag=%v double=%v", isDrag, double)
 			if !clientAreaAt(start.pt) || !sameRootAt(start.root, ev.pt) {
+				hookLog("gesture rejected: client=%v root=%v", clientAreaAt(start.pt), sameRootAt(start.root, ev.pt))
 				continue
 			}
 			if pointInOurApp(ev.pt) || foregroundIsOurs() || ctrlOrAltDown() {
+				hookLog("gesture rejected: ours=%v foregroundOurs=%v modifiers=%v",
+					pointInOurApp(ev.pt), foregroundIsOurs(), ctrlOrAltDown())
 				continue
 			}
 			if blockedWindowAt(start.pt) {
+				hookLog("gesture rejected: blocked window")
 				continue
 			}
 			hwnd := foregroundWindow()
@@ -254,13 +288,11 @@ func processMouseEvents(a *app, events <-chan mouseEvent) {
 				continue
 			}
 			gen := dragSeq.Load()
-			p := mygo.Screen.CursorScreenPoint()
-			go captureToolbarSelection(a, gen, p, hwnd)
+			go captureToolbarSelection(a, gen, hwnd)
 
 		case wmRButtonDown, wmMButtonDown, wmMouseWheel:
 			dragSeq.Add(1)
 			down = nil
-			a.hideSelectionToolbar()
 		}
 	}
 }
@@ -268,7 +300,7 @@ func processMouseEvents(a *app, events <-chan mouseEvent) {
 // captureToolbarSelection runs off the hook thread. Reading the selection
 // takes a few hundred milliseconds, so every check is repeated after it: a
 // new click or a foreground change cancels this particular toolbar.
-func captureToolbarSelection(a *app, gen uint64, p mygo.Point, hwnd uintptr) {
+func captureToolbarSelection(a *app, gen uint64, hwnd uintptr) {
 	time.Sleep(140 * time.Millisecond)
 	if !selectionToolbarEnabled.Load() || dragSeq.Load() != gen {
 		return
@@ -276,6 +308,7 @@ func captureToolbarSelection(a *app, gen uint64, p mygo.Point, hwnd uintptr) {
 	if foregroundWindow() != hwnd {
 		return
 	}
+	hookLog("capture hwnd=%d", hwnd)
 	captureMu.Lock()
 	defer captureMu.Unlock()
 	if !selectionToolbarEnabled.Load() || dragSeq.Load() != gen {
@@ -283,12 +316,27 @@ func captureToolbarSelection(a *app, gen uint64, p mygo.Point, hwnd uintptr) {
 	}
 	text, err := readSelectedText()
 	if err != nil || strings.TrimSpace(text) == "" {
+		hookLog("capture empty: err=%v len=%d", err, len(text))
 		return
 	}
 	if !selectionToolbarEnabled.Load() || dragSeq.Load() != gen {
 		return
 	}
-	a.showSelectionToolbar(text, p)
+	mygo.RunOnMain(func() {
+		if dragSeq.Load() == gen {
+			a.receiveSelection(text)
+		}
+	})
+}
+
+// doubleClickWindow is the system double-click time. Read it per gesture so a
+// change in Windows settings takes effect without a restart.
+func doubleClickWindow() time.Duration {
+	r, _, _ := procGetDoubleClickTime.Call()
+	if r == 0 {
+		return 500 * time.Millisecond
+	}
+	return time.Duration(r) * time.Millisecond
 }
 
 // pointerFromUintptr turns the pointer the hook callback received back into

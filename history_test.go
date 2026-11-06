@@ -11,17 +11,17 @@ func TestHistoryStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.close()
+	defer s.Close()
 
 	now := time.Now()
-	if err := s.add(historyEntry{CreatedAt: now, Source: "Hello world", Result: "你好，世界", Target: "简体中文", Mode: "text"}); err != nil {
+	if err := s.Add(historyEntry{CreatedAt: now, Source: "Hello world", Result: "你好，世界", Target: "简体中文", Mode: "text"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.add(historyEntry{CreatedAt: now, Source: "Screenshot", Result: "截图", Target: "简体中文", Mode: "image"}); err != nil {
+	if err := s.Add(historyEntry{CreatedAt: now, Source: "Screenshot", Result: "截图", Target: "简体中文", Mode: "image"}); err != nil {
 		t.Fatal(err)
 	}
 
-	all, err := s.search("", 10)
+	all, err := s.Search("", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestHistoryStore(t *testing.T) {
 		t.Fatalf("entries %#v", all)
 	}
 
-	hits, err := s.search("Hello", 10)
+	hits, err := s.Search("Hello", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,10 +37,10 @@ func TestHistoryStore(t *testing.T) {
 		t.Fatalf("hits %#v", hits)
 	}
 
-	if err := s.clear(); err != nil {
+	if err := s.Clear(); err != nil {
 		t.Fatal(err)
 	}
-	left, err := s.search("", 10)
+	left, err := s.Search("", 10)
 	if err != nil {
 		t.Fatal(err)
 	}

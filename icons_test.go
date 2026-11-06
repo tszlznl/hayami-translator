@@ -2,9 +2,36 @@ package main
 
 import (
 	"context"
+	"io"
 	"os/exec"
+	"reflect"
+	"runtime"
 	"testing"
 )
+
+func TestLinuxSpeechCommandUsesStdin(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux speech command")
+	}
+	text := "引号 ' \"\n$(touch /never-run); --voices <speak>literal text</speak>"
+	cmd, err := speechCommand(context.Background(), text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"espeak-ng", "--stdin"}; !reflect.DeepEqual(cmd.Args, want) {
+		t.Fatalf("args = %q, want %q", cmd.Args, want)
+	}
+	if cmd.Stdin == nil {
+		t.Fatal("speech text must be sent through stdin")
+	}
+	input, err := io.ReadAll(cmd.Stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(input) != text {
+		t.Fatalf("stdin = %q, want %q", input, text)
+	}
+}
 
 func TestSpeechPlaybackStopsBeforeCommandStarts(t *testing.T) {
 	var playback speechPlayback

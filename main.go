@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -34,35 +36,21 @@ type trayController interface {
 }
 
 type app struct {
-	cfg          Config
-	providerName string
-	store        *historyStore
+	cfg           Config
+	providerName  string
+	store         *historyStore
+	initialAction string
 
-	popup      *mygo.Window
-	settings   *mygo.Window
-	historyWin *mygo.Window
-	toolbar    *mygo.Window
-	inputWin   *mygo.Window
-	tray       trayController
-	hotkeys    []string
-	hotkeyErr  string
-
-	// Drag-selection toolbar. The hook captures the text before the panel is
-	// shown; clicking the panel would otherwise move the foreground and make
-	// a second Ctrl+C target the panel itself.
-	triggerMode     atomic.Pointer[string]
-	bubbleReqID     int
-	bubbleCancel    context.CancelFunc
-	toolbarText     string
-	toolbarPoint    mygo.Point
-	toolbarHadFocus bool
-	toolbarShowID   int
-	toolbarEnabled  bool
-	toolbarIsBubble bool
-	toolbarWord     string
-	toolbarPhonetic string
-	toolbarPos      string
-	toolbarDef      string
+	popup            *mygo.Window
+	panelBackdrops   []*mygo.Window
+	tray             trayController
+	panelPage        panelPage
+	selectionBlocked atomic.Bool
+	selectionReqID   int
+	hotkeys          []string
+	hotkeyErr        string
+	cfgWatchCancel   context.CancelFunc
+	toolbarEnabled   bool
 
 	// Translation shown by the popup.
 	source        string
@@ -71,20 +59,32 @@ type app struct {
 	multiEngine   bool
 	quitting      bool
 	errText       string
+	errHint       string
 	status        string
 	streaming     bool
 	hasImage      bool
 	shot          []byte
 	targetLang    string
+	activeMode    string
 	reqID         int
 	cancel        context.CancelFunc
 	shotCancel    context.CancelFunc
 	md            markdown.Options
 	popupScroll   ui.ScrollState
 	focusInput    bool
+	popupEditing  bool
 	popupHadFocus bool
 	popupPinned   bool
 	inputHandle   ui.Handle
+
+	// Follow-up turn on the current result.
+	followUpInput     string
+	followUpQ         string
+	followUp          string
+	followUpErr       string
+	followUpStreaming bool
+	followUpReqID     int
+	followUpCancel    context.CancelFunc
 
 	// Standalone input translation window.
 	inputSource            string
@@ -100,29 +100,91 @@ type app struct {
 
 	// Settings window. form is a draft; the running config changes only when
 	// Save is pressed.
-	form                Config
-	openAtLogin         bool
-	settingsStatus      string
-	providerDeleteArmed string
-	settingsTab         int
-	settingsScroll      ui.ScrollState
+	form                 Config
+	openAtLogin          bool
+	settingsStatus       string
+	settingsCloseAsk     bool
+	providerDeleteArmed  string
+	settingsTab          int
+	settingsModesEditing bool
+	settingsScroll       ui.ScrollState
 
 	// History window.
-	hist        []historyEntry
-	histQuery   string
-	histStatus  string
-	histReqID   int
-	histList    ui.ListState
-	historyOpen bool
-	clearArmed  bool
+	hist       []historyEntry
+	histQuery  string
+	histStatus string
+	histReqID  int
+	histList   ui.ListState
+	clearArmed bool
+}
+
+const appVersion = "0.2.2"
+
+func parseCLIAction(args []string) string {
+	for _, arg := range args {
+		switch strings.ToLower(strings.TrimSpace(arg)) {
+		case "selection", "--selection", "-s", "-sel":
+			return "selection"
+		case "input", "--input", "-i":
+			return "input"
+		case "screenshot", "--screenshot", "-c", "-ss", "--shot", "shot":
+			return "screenshot"
+		case "settings", "--settings", "-p":
+			return "settings"
+		case "toggle", "--toggle", "-t":
+			return "toggle"
+		}
+	}
+	return ""
+}
+
+func printCLIHelp() {
+	fmt.Println(`Hayami Translator - 极简原生的划词与多引擎翻译工具
+
+用法:
+  hayami [选项]
+
+选项:
+  -s, --selection   读取当前选区并翻译 (默认快捷键: Alt+F)
+  -i, --input       打开独立输入翻译窗口 (默认快捷键: Alt+D)
+  -c, --screenshot  区域截图翻译 (默认快捷键: Alt+S)
+  -p, --settings    打开设置界面
+  -t, --toggle      显示或隐藏主面板
+  -h, --help        显示帮助信息
+  -v, --version     显示版本信息`)
+}
+
+func printCLIVersion() {
+	fmt.Printf("Hayami Translator v%s\n", appVersion)
 }
 
 func main() {
-	appData := os.Getenv("APPDATA")
-	if appData != "" {
-		logDir := filepath.Join(appData, "Hayami Translator")
-		_ = os.MkdirAll(logDir, 0o755)
-		f, err := os.OpenFile(filepath.Join(logDir, "debug.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	// Tune memory footprint for resident background daemon operation:
+	// Avoid loading heavy proprietary GPU shader compiler & LLVM libs unless requested.
+	if os.Getenv("MYGO_GPU") == "" {
+		_ = os.Setenv("MYGO_GPU", "0")
+	}
+	debug.SetGCPercent(40)
+	debug.SetMemoryLimit(48 * 1024 * 1024)
+
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--help", "-h", "help":
+			printCLIHelp()
+			return
+		case "--version", "-v", "version":
+			printCLIVersion()
+			return
+		}
+	}
+
+	initialAction := parseCLIAction(os.Args[1:])
+
+	mygo.App.SetName("Hayami Translator")
+
+	if dir := userDataDir(); dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+		f, err := os.OpenFile(filepath.Join(dir, "debug.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err == nil {
 			log.SetOutput(f)
 			defer f.Close()
@@ -141,16 +203,13 @@ func main() {
 		return
 	}
 	log.Println("[debug] single instance lock acquired")
-	mygo.App.SetName("Hayami Translator")
-	a := &app{}
+	a := &app{
+		initialAction: initialAction,
+	}
 	mygo.App.OnWindowAllClosed(func() {}) // a tray app: closing a window does not quit
-	mygo.App.OnSecondInstance(func([]string, string) {
-		log.Println("[debug] OnSecondInstance received")
-		if !hasConfiguredProvider(a.cfg) {
-			a.showSettings()
-		} else {
-			a.showCenterPopup(true)
-		}
+	mygo.App.OnSecondInstance(func(args []string, _ string) {
+		log.Println("[debug] OnSecondInstance received:", args)
+		a.dispatchAction(parseCLIAction(args))
 	})
 	mygo.App.WhenReady(a.ready)
 	log.Println("[debug] calling mygo.App.Run()")
@@ -167,6 +226,9 @@ func (a *app) ready() {
 	log.Println("[debug] migrateUserData() done")
 	migrateLegacyStartup()
 	log.Println("[debug] migrateLegacyStartup() done")
+	if err := writeConfigSchema(); err != nil {
+		log.Print("writing config schema: ", err)
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Print("loading config: ", err)
@@ -177,15 +239,16 @@ func (a *app) ready() {
 		log.Printf("[debug] provider %s (%s): enabled=%v, keyLen=%d, configured=%v",
 			p.ID, p.Kind, p.Enabled, len(p.Key), providerConfigured(p, p.Key))
 	}
-	a.form = a.cfg.clone()
+	a.form = a.cfg.Clone()
 	a.providerName = activeProviderLabel(a.cfg)
 	a.targetLang = a.cfg.TargetLang
+	a.activeMode = a.cfg.ActiveMode
 	a.multiEngine = a.cfg.MultiEngine
 	a.toolbarEnabled = !a.cfg.DisableSelectionToolbar
-	a.setTriggerMode(a.cfg.TriggerMode)
 	a.popupPinned = a.cfg.PopupPinned
+	applyThemeMode(a.cfg.Theme)
 	a.openAtLogin = mygo.App.OpenAtLogin()
-	a.md = markdown.Options{Theme: &markdown.Theme{FontSize: 14}}
+	a.md = markdown.Options{Theme: &markdown.Theme{FontSize: 13}}
 
 	a.store, err = openHistory()
 	if err != nil {
@@ -200,6 +263,11 @@ func (a *app) ready() {
 		a.quitting = true
 	})
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		if a.cfgWatchCancel != nil {
+			a.cfgWatchCancel()
+			a.cfgWatchCancel = nil
+		}
+		a.cancelFollowUp()
 		stopSelectionHook()
 		a.cancelStream()
 		if a.shotCancel != nil {
@@ -210,15 +278,11 @@ func (a *app) ready() {
 			a.inputCancel()
 			a.inputCancel = nil
 		}
-		if a.bubbleCancel != nil {
-			a.bubbleCancel()
-			a.bubbleCancel = nil
-		}
 		stopSpeaking()
 		if a.tray != nil {
 			a.tray.Destroy()
 		}
-		a.store.close()
+		a.store.Close()
 	})
 	a.registerHotkeys()
 	log.Printf("[debug] registerHotkeys() done, hotkeys=%v, hotkeyErr=%q", a.hotkeys, a.hotkeyErr)
@@ -229,35 +293,44 @@ func (a *app) ready() {
 		log.Print("starting selection toolbar hook: ", err)
 	}
 	log.Println("[debug] startSelectionHook() done")
+	a.startConfigWatch()
 
 	configured := hasConfiguredProvider(a.cfg)
 	openedAtLogin := mygo.App.WasOpenedAtLogin()
-	log.Printf("[debug] configured=%v, openedAtLogin=%v", configured, openedAtLogin)
-	if !configured {
+	log.Printf("[debug] configured=%v, openedAtLogin=%v, initialAction=%q", configured, openedAtLogin, a.initialAction)
+	if a.initialAction != "" {
+		a.dispatchAction(a.initialAction)
+	} else if !configured {
 		log.Println("[debug] showing settings because no configured provider")
 		a.showSettings()
 	} else if !openedAtLogin {
 		log.Println("[debug] showing centered popup on launch")
-		a.showCenterPopup(true)
+		a.showPopup()
 	}
+	runtime.GC()
+	debug.FreeOSMemory()
 	log.Println("[debug] ready() finished")
 }
 
-func (a *app) getTriggerMode() string {
-	if p := a.triggerMode.Load(); p != nil {
-		return *p
+func (a *app) dispatchAction(action string) {
+	if !hasConfiguredProvider(a.cfg) {
+		a.showSettings()
+		return
 	}
-	if a.cfg.TriggerMode != "" {
-		return a.cfg.TriggerMode
+	switch action {
+	case "selection":
+		a.translateSelection()
+	case "input":
+		a.showInputWindow()
+	case "screenshot":
+		a.translateScreenshot()
+	case "settings":
+		a.showSettings()
+	case "toggle":
+		a.togglePanel()
+	default:
+		a.showPopup()
 	}
-	return triggerModeIcon
-}
-
-func (a *app) setTriggerMode(m string) {
-	if m == "" {
-		m = triggerModeIcon
-	}
-	a.triggerMode.Store(&m)
 }
 
 // engineLabel names the engine in the popup and input window footers: the
@@ -275,102 +348,48 @@ func (a *app) engineLabel() string {
 func (a *app) inputHotkeyLabel() string {
 	h := strings.TrimSpace(a.cfg.InputHotkey)
 	if h == "" {
-		return "Ctrl+Alt+I"
+		return "Alt+D"
 	}
 	return h
 }
 
 func (a *app) createWindows() {
+	a.createPanelBackdrops()
+	w, h := a.desiredPanelSize()
+	rad := 12
+	if isKDE() {
+		rad = 8
+	}
 	a.popup = mygo.NewWindow(mygo.WindowOptions{
 		Title:         "Hayami Translator",
 		Hidden:        true,
+		Panel:         true,
 		Frameless:     true,
+		Transparent:   true,
+		Vibrancy:      mygo.VibrancyPopover,
+		CornerRadius:  rad,
 		AlwaysOnTop:   true,
-		DisableResize: false,
-		Width:         380,
-		Height:        260,
-		MinWidth:      320,
-		MinHeight:     180,
-		Content:       ui.View(a.popupView),
+		SkipTaskbar:   true,
+		DisableResize: true,
+		Width:         w,
+		Height:        h,
+		Content:       ui.View(a.panelView),
 	})
 	a.popup.OnClose(func(e *mygo.CloseEvent) {
-		a.handleWindowClose(e, a.popup.Hide)
+		a.handleWindowClose(e, a.requestClosePanel)
 	})
 	a.popup.OnFocus(func() {
-		log.Println("[debug] popup.OnFocus()")
+		log.Print("[debug] panel focused")
 		a.popupHadFocus = true
+		a.selectionBlocked.Store(true)
 	})
 	a.popup.OnBlur(func() {
-		log.Printf("[debug] popup.OnBlur(), popupHadFocus=%v, popupPinned=%v", a.popupHadFocus, a.popupPinned)
-		// A panel that could not take the foreground (for example when a
-		// second instance asks for it) gets a blur without a focus first.
-		// Keep it visible so the user can click it instead of losing it.
-		if a.popupHadFocus {
-			a.popupHadFocus = false
-			if !a.popupPinned {
-				a.popup.Hide()
-			}
+		log.Print("[debug] panel blurred")
+		a.selectionBlocked.Store(false)
+		if a.popupHadFocus && !a.popupPinned && len(a.panelBackdrops) == 0 {
+			a.hidePopup()
 		}
-	})
-
-	a.settings = mygo.NewWindow(mygo.WindowOptions{
-		Title:     "设置 · Hayami Translator",
-		Hidden:    true,
-		Width:     880,
-		Height:    560,
-		MinWidth:  640,
-		MinHeight: 480,
-		Content:   ui.View(a.settingsView),
-	})
-	a.settings.OnClose(func(e *mygo.CloseEvent) {
-		a.handleWindowClose(e, a.settings.Hide)
-	})
-
-	a.inputWin = mygo.NewWindow(mygo.WindowOptions{
-		Title:     "输入翻译 · Hayami Translator",
-		Hidden:    true,
-		Width:     880,
-		Height:    520,
-		MinWidth:  640,
-		MinHeight: 400,
-		Content:   ui.View(a.inputWindowView),
-	})
-	a.inputWin.OnClose(func(e *mygo.CloseEvent) {
-		a.handleWindowClose(e, a.inputWin.Hide)
-	})
-
-	a.historyWin = mygo.NewWindow(mygo.WindowOptions{
-		Title:     "历史记录 · Hayami Translator",
-		Hidden:    true,
-		Width:     720,
-		Height:    620,
-		MinWidth:  480,
-		MinHeight: 360,
-		Content:   ui.View(a.historyView),
-	})
-	a.historyWin.OnClose(func(e *mygo.CloseEvent) {
-		a.handleWindowClose(e, a.historyWin.Hide)
-	})
-
-	a.toolbar = mygo.NewWindow(mygo.WindowOptions{
-		Title:         "划词助手",
-		Panel:         true,
-		Hidden:        true,
-		Frameless:     true,
-		DisableResize: true,
-		Width:         34,
-		Height:        34,
-		Content:       ui.View(a.toolbarView),
-	})
-	a.toolbar.OnClose(func(e *mygo.CloseEvent) {
-		a.handleWindowClose(e, a.hideSelectionToolbar)
-	})
-	a.toolbar.OnFocus(func() { a.toolbarHadFocus = true })
-	a.toolbar.OnBlur(func() {
-		if a.toolbarHadFocus {
-			a.toolbarHadFocus = false
-			a.hideSelectionToolbar()
-		}
+		a.popupHadFocus = false
 	})
 }
 
@@ -384,89 +403,54 @@ func (a *app) handleWindowClose(e *mygo.CloseEvent, hide func()) {
 	}
 }
 
-// showCenterPopup places the window in the center of the display and optionally pins it.
-func (a *app) showCenterPopup(pinned bool) {
-	if a.popup == nil {
-		return
-	}
-	a.popup.Center()
-	if pinned {
-		a.popupPinned = true
-	}
-	a.showPopup()
-}
-
-// showPopupAtCursor places the panel next to the pointer, inside the work
-// area of the display the pointer is on.
-func (a *app) showPopupAtCursor() {
-	if a.popup == nil {
-		log.Println("[debug] showPopupAtCursor: a.popup is nil!")
-		return
-	}
-	p := mygo.Screen.CursorScreenPoint()
-	log.Printf("[debug] showPopupAtCursor at %v", p)
-	a.placePopup(p)
-	a.showPopup()
-}
-
-// showPopup shows the panel and asks for the keyboard. Windows may refuse
-// SetForegroundWindow to a process the user is not in, in which case the
-// panel stays visible but inactive until it is clicked.
 func (a *app) showPopup() {
-	a.popupHadFocus = a.popup.IsFocused()
-	log.Printf("[debug] showPopup: isFocused before show=%v", a.popupHadFocus)
-	a.popup.Show()
-	a.popup.Focus()
-	log.Printf("[debug] showPopup: isVisible after show=%v", a.popup.IsVisible())
+	a.showPanel(panelTranslation)
 }
 
 func (a *app) hidePopup() {
+	a.invalidateCapture()
 	a.popupHadFocus = false
+	a.selectionBlocked.Store(false)
 	a.popupPinned = a.cfg.PopupPinned
-	a.popup.Hide()
+	if a.popup != nil {
+		a.popup.Hide()
+	}
+	for _, backdrop := range a.panelBackdrops {
+		backdrop.Hide()
+	}
+	runtime.GC()
+	debug.FreeOSMemory()
 }
 
-func (a *app) placePopup(p mygo.Point) {
-	d := mygo.Screen.DisplayNearestPoint(p)
-	w, h := a.popup.Size()
-	x, y := p.X+14, p.Y+18
-	if x+w > d.WorkArea.X+d.WorkArea.Width {
-		x = p.X - w - 14
+func (a *app) refreshTheme() {
+	if a.popup != nil && a.popup.IsVisible() {
+		a.popup.Invalidate()
 	}
-	if y+h > d.WorkArea.Y+d.WorkArea.Height {
-		y = p.Y - h - 18
-	}
-	x = max(d.WorkArea.X, x)
-	y = max(d.WorkArea.Y, y)
-	a.popup.SetPosition(x, y)
 }
 
 func (a *app) refreshSettingsWindow() {
-	if a.settings != nil && a.settings.IsVisible() {
-		a.settings.Update(func() {})
+	if a.panelPage == panelSettings {
+		a.refreshTheme()
 	}
 }
 
 func (a *app) showSettings() {
-	a.form = a.cfg.clone()
-	if a.form.TriggerMode == "" {
-		a.form.TriggerMode = triggerModeIcon
+	if !a.settingsDirty() {
+		a.form = a.cfg.Clone()
+		a.toolbarEnabled = !a.cfg.DisableSelectionToolbar
+		a.providerDeleteArmed = ""
+		a.settingsModesEditing = len(a.form.Modes) > 0
 	}
-	a.toolbarEnabled = !a.cfg.DisableSelectionToolbar
-	a.setTriggerMode(a.cfg.TriggerMode)
-	a.popupPinned = a.cfg.PopupPinned
-	a.openAtLogin = mygo.App.OpenAtLogin()
-	a.providerDeleteArmed = ""
-	a.settings.Center()
-	a.settings.Show()
-	a.settings.Focus()
+	if a.popup != nil {
+		a.openAtLogin = mygo.App.OpenAtLogin()
+	}
+	a.settingsCloseAsk = false
+	a.showPanel(panelSettings)
 }
 
 func (a *app) showHistory() {
 	a.clearArmed = false
-	a.historyWin.Center()
-	a.historyWin.Show()
-	a.historyWin.Focus()
+	a.showPanel(panelHistory)
 	a.reloadHistory()
 }
 
@@ -513,6 +497,7 @@ func (a *app) setUpTray() {
 	}
 	log.Println("[debug] mygo.NewTray succeeded")
 	a.tray = tray
+	tray.OnClick(a.togglePanel)
 	a.refreshTrayMenu()
 	if !mygo.App.WasOpenedAtLogin() {
 		_ = mygo.NewNotification(mygo.NotificationOptions{
@@ -540,7 +525,7 @@ func (a *app) trayMenu() *mygo.Menu {
 			old := a.toolbarEnabled
 			a.toolbarEnabled = !old
 			a.cfg.DisableSelectionToolbar = !a.toolbarEnabled
-			if err := a.cfg.save(); err != nil {
+			if err := a.cfg.Save(); err != nil {
 				log.Print("saving toolbar setting: ", err)
 				a.toolbarEnabled = old
 				a.cfg.DisableSelectionToolbar = !old
@@ -549,13 +534,10 @@ func (a *app) trayMenu() *mygo.Menu {
 			}
 			a.form.DisableSelectionToolbar = !a.toolbarEnabled
 			setSelectionToolbarEnabled(a.toolbarEnabled)
-			if !a.toolbarEnabled {
-				a.hideSelectionToolbar()
-			}
 			a.refreshTrayMenu()
 			a.refreshSettingsWindow()
 		}},
-		{Label: "显示翻译窗口", Click: func(*mygo.MenuItem, *mygo.Window) { a.showCenterPopup(true) }},
+		{Label: "显示翻译窗口", Click: func(*mygo.MenuItem, *mygo.Window) { a.showPopup() }},
 		{Label: "翻译选中文本", Accelerator: a.cfg.Hotkey, Click: func(*mygo.MenuItem, *mygo.Window) { a.translateSelection() }},
 		{Label: "输入翻译…", Accelerator: a.inputHotkeyLabel(), Click: func(*mygo.MenuItem, *mygo.Window) { a.showInputWindow() }},
 		{Label: "截图翻译", Accelerator: a.cfg.ScreenshotHotkey, Click: func(*mygo.MenuItem, *mygo.Window) { a.translateScreenshot() }},
@@ -596,39 +578,35 @@ func (a *app) translateSelection() {
 	if a.popup == nil {
 		return
 	}
-	p := mygo.Screen.CursorScreenPoint()
 	if a.popup.IsVisible() {
 		a.hidePopup()
 	}
+	a.selectionReqID++
+	id := a.selectionReqID
 	go func() {
 		text, err := readSelectedText()
 		a.popup.Update(func() {
+			if a.quitting || id != a.selectionReqID {
+				return
+			}
+			if err == nil && strings.TrimSpace(text) != "" {
+				a.showTranslation(text)
+				return
+			}
 			a.resetTranslation()
 			a.source = text
-			a.hasImage = false
-			a.shot = nil
-			switch {
-			case err != nil:
-				a.placePopup(p)
-				a.showPopup()
+			a.status = "输入文本后按 Ctrl+Enter 翻译"
+			if err != nil {
 				a.status = err.Error()
-				a.focusInput = true
-			case strings.TrimSpace(text) == "":
-				a.showCenterPopup(true)
-				a.status = "输入文本后按 Ctrl+Enter 翻译"
-				a.focusInput = true
-			default:
-				a.placePopup(p)
-				a.showPopup()
-				a.startTranslation()
 			}
+			a.focusInput = true
+			a.popupEditing = true
+			a.showPopup()
 		})
 	}()
 }
 
-// showTranslationAt translates text that was already read, so the drag
-// toolbar does not need to send a second Ctrl+C after it has taken focus.
-func (a *app) showTranslationAt(text string, p mygo.Point) {
+func (a *app) showTranslation(text string) {
 	if a.popup == nil {
 		return
 	}
@@ -636,11 +614,11 @@ func (a *app) showTranslationAt(text string, p mygo.Point) {
 	a.source = text
 	a.hasImage = false
 	a.shot = nil
-	a.placePopup(p)
 	a.showPopup()
 	if strings.TrimSpace(text) == "" {
 		a.status = "没有读到选中文本，直接输入后点翻译"
 		a.focusInput = true
+		a.popupEditing = true
 		return
 	}
 	a.startTranslation()
@@ -656,23 +634,30 @@ func (a *app) translateScreenshot() {
 		a.shotCancel()
 		a.shotCancel = nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	a.shotCancel = cancel
 
-	before := clipboardSeq()
-	startSnipping()
+	a.selectionReqID++
+	id := a.selectionReqID
 	go func() {
-		img := waitClipboardImage(ctx, before, 60*time.Second)
-		if img == nil || ctx.Err() != nil {
+		defer cancel()
+		img, err := captureScreenshot(ctx)
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 			return
 		}
-		p := mygo.Screen.CursorScreenPoint()
 		a.popup.Update(func() {
+			if a.quitting || id != a.selectionReqID {
+				return
+			}
 			a.resetTranslation()
+			if err != nil {
+				a.status = "截图失败：" + err.Error()
+				a.showPopup()
+				return
+			}
 			a.hasImage = true
 			a.shot = img
 			a.source = ""
-			a.placePopup(p)
 			a.showPopup()
 			a.startTranslation()
 		})
@@ -681,13 +666,20 @@ func (a *app) translateScreenshot() {
 
 func (a *app) resetTranslation() {
 	a.cancelStream()
+	a.cancelFollowUp()
+	a.followUpInput = ""
+	a.followUpQ = ""
+	a.followUp = ""
+	a.followUpErr = ""
 	a.source = ""
 	a.result = ""
 	a.results = nil
 	a.errText = ""
+	a.errHint = ""
 	a.status = ""
 	a.hasImage = false
 	a.shot = nil
+	a.popupEditing = false
 }
 
 func (a *app) cancelStream() {
@@ -701,6 +693,10 @@ func (a *app) cancelStream() {
 
 func (a *app) startTranslation() {
 	a.cancelStream()
+	a.cancelFollowUp()
+	a.followUpQ = ""
+	a.followUp = ""
+	a.followUpErr = ""
 	cfg := a.cfg
 	var messages []chatMessage
 	var mode, sourceText string
@@ -712,15 +708,16 @@ func (a *app) startTranslation() {
 	default:
 		sourceText = strings.TrimSpace(a.source)
 		if sourceText == "" {
-			a.status = "请输入要翻译的文本"
+			a.status = "请输入要处理的文本"
 			return
 		}
 		cfg.TargetLang = effectiveTarget(cfg.TargetLang, sourceText)
-		messages = textMessages(cfg, sourceText)
-		mode = "text"
+		m := a.currentMode()
+		messages = messagesForMode(cfg, sourceText, m)
+		mode = m.ID
 	}
 
-	providers := cfg.enabledProviders(a.hasImage)
+	providers := cfg.EnabledProviders(a.hasImage)
 	configured := providers[:0]
 	for _, p := range providers {
 		if providerConfigured(p, p.Key) {
@@ -731,8 +728,10 @@ func (a *app) startTranslation() {
 	a.result = ""
 	a.results = nil
 	a.errText = ""
+	a.errHint = ""
 	a.status = ""
 	a.focusInput = false
+	a.popupEditing = false
 
 	if len(providers) == 0 {
 		if a.hasImage {
@@ -740,6 +739,7 @@ func (a *app) startTranslation() {
 		} else {
 			a.errText = "没有可用的翻译服务，请在设置里填写 Key"
 		}
+		a.errHint = "打开设置，确认服务已启用并填写了 Key。"
 		a.streaming = false
 		return
 	}
@@ -797,7 +797,8 @@ func (a *app) startTranslation() {
 						if a.reqID == id && idx < len(a.results) {
 							a.results[idx].Streaming = false
 							if err != nil && ctx.Err() == nil {
-								a.results[idx].ErrText = err.Error()
+								title, _ := explainError(err)
+								a.results[idx].ErrText = title
 							}
 						}
 					})
@@ -811,6 +812,9 @@ func (a *app) startTranslation() {
 					return
 				}
 				a.streaming = false
+				if a.panelPage == panelTranslation && a.popup != nil && a.popup.IsVisible() {
+					a.placePanel()
+				}
 				var successCount int
 				var combined strings.Builder
 				for i := range a.results {
@@ -827,6 +831,7 @@ func (a *app) startTranslation() {
 				}
 				if successCount == 0 && ctx.Err() == nil {
 					a.errText = "所有翻译服务均失败"
+					a.errHint = "展开各服务的错误卡片，或检查设置里的翻译服务。"
 				} else if successCount < len(a.results) {
 					a.status = fmt.Sprintf("部分完成 (%d/%d 成功)", successCount, len(a.results))
 					a.result = combined.String()
@@ -846,7 +851,7 @@ func (a *app) startTranslation() {
 					Mode:      mode,
 				}
 				go func() {
-					if err := a.store.add(entry); err != nil {
+					if err := a.store.Add(entry); err != nil {
 						log.Print("history: ", err)
 						return
 					}
@@ -897,11 +902,16 @@ func (a *app) startTranslation() {
 				return
 			}
 			a.streaming = false
+			if a.panelPage == panelTranslation && a.popup != nil && a.popup.IsVisible() {
+				a.placePanel()
+			}
 			if err != nil && ctx.Err() == nil {
+				title, hint := explainError(err)
 				if strings.TrimSpace(a.result) == "" {
-					a.errText = err.Error()
+					a.errText = title
+					a.errHint = hint
 				} else {
-					a.status = "部分失败：" + err.Error()
+					a.status = "部分失败：" + title
 				}
 			}
 			result := a.result
@@ -916,7 +926,7 @@ func (a *app) startTranslation() {
 				Mode:      mode,
 			}
 			go func() {
-				if err := a.store.add(entry); err != nil {
+				if err := a.store.Add(entry); err != nil {
 					log.Print("history: ", err)
 					return
 				}
@@ -964,21 +974,24 @@ func (a *app) copyResult() {
 }
 
 func (a *app) saveSettings() {
-	f := a.form.clone()
-	f.fillDefaults()
-	f.normalizeProviders()
+	f := a.form.Clone()
+	f.FillDefaults()
+	f.NormalizeProviders()
 	f.BaseURL = strings.TrimSpace(f.BaseURL)
 	f.Model = strings.TrimSpace(f.Model)
 	f.Hotkey = strings.TrimSpace(f.Hotkey)
 	f.ScreenshotHotkey = strings.TrimSpace(f.ScreenshotHotkey)
 	f.InputHotkey = strings.TrimSpace(f.InputHotkey)
-	f.DisableSelectionToolbar = !a.toolbarEnabled
+	if err := validateConfig(f); err != nil {
+		a.settingsStatus = err.Error()
+		return
+	}
 	// Save keys first; if keyring fails, abort without overwriting config file
 	if err := saveProviderKeys(f); err != nil {
 		a.settingsStatus = "保存失败，密钥写入凭据管理器失败：" + err.Error()
 		return
 	}
-	if err := f.save(); err != nil {
+	if err := f.Save(); err != nil {
 		a.settingsStatus = "保存配置文件失败：" + err.Error()
 		return
 	}
@@ -995,17 +1008,17 @@ func (a *app) saveSettings() {
 		}
 	}
 	a.cfg = f
-	a.form = f.clone()
-	a.setTriggerMode(f.TriggerMode)
-	a.popupPinned = f.PopupPinned
+	a.form = f.Clone()
+	a.toolbarEnabled = !f.DisableSelectionToolbar
+	applyThemeMode(f.Theme)
+	a.refreshTheme()
+	a.setPanelPinned(f.PopupPinned)
 	a.providerDeleteArmed = ""
 	a.providerName = activeProviderLabel(f)
 	a.targetLang = f.TargetLang
+	a.activeMode = f.ActiveMode
 	a.multiEngine = f.MultiEngine
 	setSelectionToolbarEnabled(a.toolbarEnabled)
-	if !a.toolbarEnabled {
-		a.hideSelectionToolbar()
-	}
 	a.registerHotkeys()
 	a.refreshTrayMenu()
 	if !hasConfiguredProvider(f) {
@@ -1025,8 +1038,8 @@ func (a *app) reloadHistory() {
 	id := a.histReqID
 	q := a.histQuery
 	go func() {
-		entries, err := a.store.search(q, 200)
-		a.historyWin.Update(func() {
+		entries, err := a.store.Search(q, 200)
+		a.popup.Update(func() {
 			if a.histReqID != id || a.histQuery != q {
 				return
 			}
@@ -1045,10 +1058,10 @@ func (a *app) reloadHistory() {
 }
 
 func (a *app) refreshHistory() {
-	if a.historyWin == nil || !a.historyWin.IsVisible() {
+	if a.popup == nil || !a.popup.IsVisible() || a.panelPage != panelHistory {
 		return
 	}
-	a.historyWin.Update(func() { a.reloadHistory() })
+	a.popup.Update(func() { a.reloadHistory() })
 }
 
 func (a *app) useHistoryEntry(e historyEntry) {
@@ -1061,12 +1074,12 @@ func (a *app) useHistoryEntry(e historyEntry) {
 	}
 	a.cfg.TargetLang = a.targetLang
 	a.form.TargetLang = a.targetLang
-	a.hasImage = false
-	if a.historyWin != nil {
-		a.historyWin.Hide()
+	if _, ok := a.cfg.Mode(e.Mode); ok {
+		a.activeMode = e.Mode
+		a.cfg.ActiveMode = e.Mode
+		a.form.ActiveMode = e.Mode
 	}
-	p := mygo.Screen.CursorScreenPoint()
-	a.placePopup(p)
+	a.hasImage = false
 	a.showPopup()
 }
 

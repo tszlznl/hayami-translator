@@ -1,10 +1,12 @@
-package main
+// Package llm speaks the OpenAI Compatible, Azure Translator and Baidu
+// translation protocols. It depends on config for the service model but has
+// no UI dependency.
+package llm
 
 import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,20 +14,22 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"hayami/internal/config"
 )
 
-type chatMessage struct {
+type Message struct {
 	Role    string `json:"role"`
 	Content any    `json:"content"`
 }
 
-type contentPart struct {
+type ContentPart struct {
 	Type     string        `json:"type"`
 	Text     string        `json:"text,omitempty"`
-	ImageURL *imageURLPart `json:"image_url,omitempty"`
+	ImageURL *ImageURLPart `json:"image_url,omitempty"`
 }
 
-type imageURLPart struct {
+type ImageURLPart struct {
 	URL string `json:"url"`
 }
 
@@ -50,7 +54,7 @@ var httpClient = &http.Client{
 	},
 }
 
-func chatEndpoint(base string) string {
+func ChatEndpoint(base string) string {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if strings.HasSuffix(base, "/chat/completions") {
 		return base
@@ -58,45 +62,22 @@ func chatEndpoint(base string) string {
 	return base + "/chat/completions"
 }
 
-func textMessages(cfg Config, source string) []chatMessage {
-	return []chatMessage{
-		{Role: "system", Content: cfg.promptFor()},
-		{Role: "user", Content: source},
-	}
+// StreamChat is the single-provider entry point kept for tests and older
+// callers. New code uses StreamOpenAI with an explicit provider.
+func StreamChat(ctx context.Context, cfg config.Config, apiKey string, messages []Message, onDelta func(string)) error {
+	return StreamOpenAI(ctx, cfg, config.Provider{
+		Kind:    config.ProviderOpenAI,
+		BaseURL: cfg.BaseURL,
+		Model:   cfg.Model,
+	}, apiKey, messages, onDelta)
 }
 
-func imageMessages(cfg Config, png []byte) []chatMessage {
-	instruction := "识别图片中的文字，并翻译成" + cfg.TargetLang + "。只输出译文，不要描述排版，不要解释；保留段落和列表结构。如果图片里没有可翻译的文字，就用" + cfg.TargetLang + "简短说明图片内容。"
-	if cfg.TargetLang == autoTarget {
-		instruction = "识别图片中的文字。如果图片里的文字主要是中文，就翻译成English；否则翻译成简体中文。只输出译文，不要描述排版，不要解释；保留段落和列表结构。如果图片里没有可翻译的文字，就用简体中文简短说明图片内容。"
-	}
-	part := contentPart{
-		Type: "image_url",
-		ImageURL: &imageURLPart{
-			URL: "data:image/png;base64," + base64.StdEncoding.EncodeToString(png),
-		},
-	}
-	return []chatMessage{
-		{Role: "system", Content: "你是专业的屏幕翻译助手。"},
-		{Role: "user", Content: []any{
-			contentPart{Type: "text", Text: instruction},
-			part,
-		}},
-	}
-}
-
-// streamChat is the single-provider entry point kept for tests and older
-// callers. New code uses streamOpenAI with an explicit provider.
-func streamChat(ctx context.Context, cfg Config, apiKey string, messages []chatMessage, onDelta func(string)) error {
-	return streamOpenAI(ctx, cfg, Provider{Kind: providerOpenAI, BaseURL: cfg.BaseURL, Model: cfg.Model}, apiKey, messages, onDelta)
-}
-
-// streamOpenAI asks an OpenAI-compatible endpoint for a streamed reply and
-// calls onDelta for every token. It returns when the stream ends, the
-// context is canceled, or the endpoint fails.
-func streamOpenAI(ctx context.Context, cfg Config, p Provider, apiKey string, messages []chatMessage, onDelta func(string)) error {
+// StreamOpenAI asks an OpenAI-compatible endpoint for a streamed reply and
+// calls onDelta for every token. It returns when the stream ends, the context
+// is canceled, or the endpoint fails.
+func StreamOpenAI(ctx context.Context, cfg config.Config, p config.Provider, apiKey string, messages []Message, onDelta func(string)) error {
 	if strings.TrimSpace(apiKey) == "" {
-		return fmt.Errorf("还没有填写 API Key，请在设置里填写")
+		return &ConfigError{Message: "还没有填写 API Key，请在设置里填写"}
 	}
 	body := map[string]any{
 		"model":       p.Model,
@@ -109,7 +90,7 @@ func streamOpenAI(ctx context.Context, cfg Config, p Provider, apiKey string, me
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatEndpoint(p.BaseURL), bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ChatEndpoint(p.BaseURL), bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
@@ -137,7 +118,7 @@ func streamOpenAI(ctx context.Context, cfg Config, p Provider, apiKey string, me
 		if msg == "" {
 			msg = http.StatusText(resp.StatusCode)
 		}
-		return fmt.Errorf("接口返回 %d：%s", resp.StatusCode, msg)
+		return &HTTPStatusError{Status: resp.StatusCode, Message: msg}
 	}
 
 	contentType := resp.Header.Get("Content-Type")

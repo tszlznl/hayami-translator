@@ -1,4 +1,4 @@
-package main
+package llm
 
 import (
 	"context"
@@ -11,44 +11,46 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"hayami/internal/config"
 )
 
-// translateWithProvider sends one translation request to one service. OpenAI
+// TranslateWithProvider sends one translation request to one service. OpenAI
 // Compatible streams tokens; Azure and Baidu return the whole result, which is
 // delivered through onDelta once.
-func translateWithProvider(ctx context.Context, cfg Config, p Provider, key string, messages []chatMessage, source string, onDelta func(string)) error {
+func TranslateWithProvider(ctx context.Context, cfg config.Config, p config.Provider, key string, messages []Message, source string, onDelta func(string)) error {
 	switch p.Kind {
-	case providerOpenAI:
-		return streamOpenAI(ctx, cfg, p, key, messages, onDelta)
-	case providerAzure:
+	case config.ProviderOpenAI:
+		return StreamOpenAI(ctx, cfg, p, key, messages, onDelta)
+	case config.ProviderAzure:
 		return translateAzure(ctx, cfg.TargetLang, p, key, source, onDelta)
-	case providerBaidu:
+	case config.ProviderBaidu:
 		return translateBaidu(ctx, cfg.TargetLang, p, key, source, onDelta)
 	default:
-		return fmt.Errorf("不支持的翻译服务：%s", p.Kind)
+		return &ConfigError{Message: "不支持的翻译服务：" + p.Kind}
 	}
 }
 
-// translateWithFallback tries the given providers in priority order until one
+// TranslateWithFallback tries the given providers in priority order until one
 // translates the whole text. onProvider, when not nil, runs before each
 // attempt (to label the engine in the UI); onDelta receives the translation
 // incrementally. A service that already emitted output is never followed by
 // another, so partial results are not concatenated.
-func translateWithFallback(ctx context.Context, cfg Config, providers []Provider, messages []chatMessage, text string, onProvider func(Provider), onDelta func(string)) error {
+func TranslateWithFallback(ctx context.Context, cfg config.Config, providers []config.Provider, messages []Message, text string, onProvider func(config.Provider), onDelta func(string)) error {
 	var lastErr error
 	for _, p := range providers {
 		if ctx.Err() != nil {
 			break
 		}
 		key := p.Key
-		if !providerConfigured(p, key) {
+		if !config.Configured(p, key) {
 			continue
 		}
 		if onProvider != nil {
 			onProvider(p)
 		}
 		emitted := false
-		err := translateWithProvider(ctx, cfg, p, key, messages, text, func(delta string) {
+		err := TranslateWithProvider(ctx, cfg, p, key, messages, text, func(delta string) {
 			emitted = true
 			onDelta(delta)
 		})
@@ -69,17 +71,17 @@ func translateWithFallback(ctx context.Context, cfg Config, providers []Provider
 	if lastErr != nil {
 		return lastErr
 	}
-	return fmt.Errorf("没有可用的翻译服务")
+	return &ConfigError{Message: "没有可用的翻译服务"}
 }
 
-func azureRequestURL(p Provider, target string) (string, error) {
+func azureRequestURL(p config.Provider, target string) (string, error) {
 	endpoint := strings.TrimSpace(p.Endpoint)
 	if endpoint == "" {
-		endpoint = defaultAzureEndpoint
+		endpoint = config.DefaultAzureEndpoint
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil {
-		return "", fmt.Errorf("Azure 接口地址无效：%w", err)
+		return "", &ConfigError{Message: "Azure 接口地址无效：" + err.Error()}
 	}
 	path := strings.TrimRight(u.Path, "/")
 	if !strings.HasSuffix(path, "/translate") {
@@ -87,17 +89,17 @@ func azureRequestURL(p Provider, target string) (string, error) {
 	}
 	q := u.Query()
 	q.Set("api-version", "3.0")
-	q.Set("to", azureLanguage(target))
+	q.Set("to", config.AzureLanguage(target))
 	u.RawQuery = q.Encode()
 	return u.String(), nil
 }
 
-func translateAzure(ctx context.Context, target string, p Provider, key, source string, onDelta func(string)) error {
+func translateAzure(ctx context.Context, target string, p config.Provider, key, source string, onDelta func(string)) error {
 	if strings.TrimSpace(key) == "" {
-		return fmt.Errorf("还没有填写 Azure 翻译 Key，请在设置里填写")
+		return &ConfigError{Message: "还没有填写 Azure 翻译 Key，请在设置里填写"}
 	}
 	if strings.TrimSpace(source) == "" {
-		return fmt.Errorf("没有要翻译的文本")
+		return &ConfigError{Message: "没有要翻译的文本"}
 	}
 	u, err := azureRequestURL(p, target)
 	if err != nil {
@@ -136,7 +138,7 @@ func translateAzure(ctx context.Context, target string, p Provider, key, source 
 		if json.Unmarshal(data, &e) == nil && e.Error.Message != "" {
 			msg = e.Error.Message
 		}
-		return fmt.Errorf("Azure 翻译返回 %d：%s", resp.StatusCode, msg)
+		return &HTTPStatusError{Service: "Azure 翻译", Status: resp.StatusCode, Message: msg}
 	}
 	var out []struct {
 		Translations []struct {
@@ -162,20 +164,20 @@ func translateAzure(ctx context.Context, target string, p Provider, key, source 
 	return nil
 }
 
-func baiduRequestURL(p Provider) string {
+func baiduRequestURL(p config.Provider) string {
 	endpoint := strings.TrimSpace(p.Endpoint)
 	if endpoint == "" {
-		endpoint = defaultBaiduEndpoint
+		endpoint = config.DefaultBaiduEndpoint
 	}
 	return endpoint
 }
 
-func translateBaidu(ctx context.Context, target string, p Provider, key, source string, onDelta func(string)) error {
+func translateBaidu(ctx context.Context, target string, p config.Provider, key, source string, onDelta func(string)) error {
 	if strings.TrimSpace(p.AppID) == "" || strings.TrimSpace(key) == "" {
-		return fmt.Errorf("还没有填写百度翻译 APP ID 或密钥，请在设置里填写")
+		return &ConfigError{Message: "还没有填写百度翻译 APP ID 或密钥，请在设置里填写"}
 	}
 	if strings.TrimSpace(source) == "" {
-		return fmt.Errorf("没有要翻译的文本")
+		return &ConfigError{Message: "没有要翻译的文本"}
 	}
 	salt := fmt.Sprintf("%d", time.Now().UnixNano())
 	sum := md5.Sum([]byte(p.AppID + source + salt + key))
@@ -183,7 +185,7 @@ func translateBaidu(ctx context.Context, target string, p Provider, key, source 
 	form := url.Values{
 		"q":     {source},
 		"from":  {"auto"},
-		"to":    {baiduLanguage(target)},
+		"to":    {config.BaiduLanguage(target)},
 		"appid": {p.AppID},
 		"salt":  {salt},
 		"sign":  {sign},
@@ -204,7 +206,7 @@ func translateBaidu(ctx context.Context, target string, p Provider, key, source 
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("百度翻译返回 %d：%s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return &HTTPStatusError{Service: "百度翻译", Status: resp.StatusCode, Message: strings.TrimSpace(string(data))}
 	}
 	var out struct {
 		TransResult []struct {
@@ -228,9 +230,9 @@ func translateBaidu(ctx context.Context, target string, p Provider, key, source 
 	if code != "" && code != "0" && code != "52000" {
 		msg := strings.TrimSpace(out.ErrorMsg)
 		if msg == "" {
-			msg = baiduErrorMessage(code)
+			msg = config.BaiduErrorMessage(code)
 		}
-		return fmt.Errorf("百度翻译错误 %s：%s", code, msg)
+		return &ServiceError{Service: "百度翻译", Code: code, Message: msg}
 	}
 	var parts []string
 	for _, item := range out.TransResult {
