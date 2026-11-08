@@ -2,5 +2,13 @@
   "name": "Hayami Translator",
   "identifier": "com.hayami.translator",
   "version": "0.2.2",
-  "out": "build"
+  "out": "build",
+  "linux": {
+    "command": "hayami",
+    "comment": "轻量桌面划词与截图翻译工具",
+    "categories": [
+      "Utility"
+    ],
+    "webview": false
+  }
 }
