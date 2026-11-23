@@ -113,3 +113,11 @@
 **理由**：Wayland 客户端隔离无法获取全局光标绝对坐标或注入全局鼠标钩子；PRIMARY 选区划选即进入，无需注入 `Ctrl+C` 侵入用户剪贴板；抽屉式面板和 CLI 管道既保证 0 剪贴板污染，又支持用户在桌面环境（如 KDE 快捷键）中灵活绑定。
 
 **放弃**：强制使用 evdev / `/dev/input` 监听鼠标（需要特权或额外用户组，且依然缺少屏幕绝对坐标）；在 Wayland 下盲目尝试光标跟随小气泡。
+
+## D15 Wayland 选区监听保留 wl-paste --watch 并推迟纯 Go 协议栈
+
+**决定**：在纯 Go（`CGO_ENABLED=0`）约束下，暂不在应用内从零实现 Wayland 原生选区二进制协议客户端（`zwp_primary_selection_v1` / `ext_data_control_v1` / `zwlr_data_control_manager_v1`），保留并加固现有的 `wl-paste --primary --watch` + X11 `xclip`/`xsel` + `pollSelection` 回退架构；详细评估见 `docs/wayland-selection-feasibility.md`。
+
+**理由**：`zwp_primary_selection_v1` 仅向当前持有键盘焦点的窗口派发选区 offer，无法在后台监听其他应用的划词；后台监听必须依赖 `ext_data_control_v1` 或 `zwlr_data_control_manager_v1`，而 GNOME Mutter 明确拒绝向非特权客户端开放 data-control 协议。自研纯 Go 线协议解析与 `SCM_RIGHTS` 文件描述符传递需维护约 800–1,500 行底层代码，却仍无法在 GNOME 上免除轮询/快捷键回退；相比之下，`wl-paste --primary --watch` 已在 KWin 与 wlroots/Smithay 合成器上实现零空转唤醒。
+
+**加固**：修复 `StdoutPipe` 与 `cmd.Wait()` 在取消时的竞态、启用独立进程组 `Setpgid` + `WaitDelay`、捕获有限长度 `stderr` 诊断日志、在 watcher 持续稳定运行 30 秒后重置失败计数，并通过可注入接口完成 `-race` 单元测试。

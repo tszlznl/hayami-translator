@@ -26,3 +26,9 @@ func activeProviderLabel(cfg Config) string { return config.ActiveLabel(cfg) }
 func hasConfiguredProvider(cfg Config) bool { return config.HasConfigured(cfg) }
 
 func nextProviderID(cfg Config, kind string) string { return config.NextProviderID(cfg, kind) }
+
+func defaultOpenAIProvider(baseURL, model string) Provider {
+	return config.DefaultOpenAIProvider(baseURL, model)
+}
+
+func isLoopbackURL(raw string) bool { return config.IsLoopbackURL(raw) }

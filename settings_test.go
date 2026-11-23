@@ -6,8 +6,10 @@ func TestSettingsDirty(t *testing.T) {
 	cfg := defaultConfig()
 	a := &app{
 		cfg:            cfg,
-		form:           cfg.Clone(),
 		toolbarEnabled: !cfg.DisableSelectionToolbar,
+		settingsState: settingsState{
+			form: cfg.Clone(),
+		},
 	}
 	if a.settingsDirty() {
 		t.Fatal("a fresh draft should match the running config")
@@ -76,8 +78,10 @@ func TestToolbarToggleSyncFormDirty(t *testing.T) {
 	cfg := defaultConfig()
 	a := &app{
 		cfg:            cfg,
-		form:           cfg.Clone(),
 		toolbarEnabled: !cfg.DisableSelectionToolbar,
+		settingsState: settingsState{
+			form: cfg.Clone(),
+		},
 	}
 	if a.settingsDirty() {
 		t.Fatal("initially clean")
@@ -102,8 +106,10 @@ func TestSettingsDirtyWithEmptyProviders(t *testing.T) {
 	cfg.FillDefaults()
 	a := &app{
 		cfg:            cfg,
-		form:           cfg.Clone(),
 		toolbarEnabled: !cfg.DisableSelectionToolbar,
+		settingsState: settingsState{
+			form: cfg.Clone(),
+		},
 	}
 	if a.settingsDirty() {
 		t.Fatal("empty providers list should not cause settings to be marked dirty")

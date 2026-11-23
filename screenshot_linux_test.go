@@ -11,7 +11,19 @@ import (
 	"time"
 )
 
+func disableLinuxPortalForTest(t *testing.T) {
+	t.Helper()
+	orig := portalScreenshotFunc
+	portalScreenshotFunc = func(context.Context) ([]byte, error) {
+		return nil, errors.New("portal disabled in test")
+	}
+	t.Cleanup(func() {
+		portalScreenshotFunc = orig
+	})
+}
+
 func TestLinuxCaptureScreenshot(t *testing.T) {
+	disableLinuxPortalForTest(t)
 	for _, test := range []struct {
 		name    string
 		script  string
@@ -55,6 +67,7 @@ case "$6" in "$TMPDIR"/hayami-screenshot-*.png) ;; *) exit 9 ;; esac
 }
 
 func TestLinuxCaptureScreenshotContextAndMissingCommand(t *testing.T) {
+	disableLinuxPortalForTest(t)
 	for _, test := range []struct {
 		name string
 		err  error
@@ -101,4 +114,76 @@ func TestLinuxCaptureScreenshotContextAndMissingCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLinuxCaptureScreenshotFallbackTools(t *testing.T) {
+	disableLinuxPortalForTest(t)
+	t.Run("grim and slurp", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "slurp"), []byte("#!/bin/sh\necho '10,20 100x80'\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "grim"), []byte("#!/bin/sh\n[ \"$1\" = -g ] && [ \"$2\" = '10,20 100x80' ] || exit 9\nprintf 'GRIMPNG' > \"$3\"\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", dir)
+		img, err := captureScreenshot(context.Background())
+		if err != nil || string(img) != "GRIMPNG" {
+			t.Fatalf("grim fallback = %q, err = %v", img, err)
+		}
+	})
+
+	t.Run("flameshot", func(t *testing.T) {
+		installLinuxTestCommand(t, "flameshot", `[ "$1" = gui ] && [ "$2" = --raw ] || exit 9; printf 'FLAMEPNG'`)
+		img, err := captureScreenshot(context.Background())
+		if err != nil || string(img) != "FLAMEPNG" {
+			t.Fatalf("flameshot fallback = %q, err = %v", img, err)
+		}
+	})
+}
+
+func TestLinuxCaptureScreenshotPortalPrecedence(t *testing.T) {
+	orig := portalScreenshotFunc
+	t.Cleanup(func() { portalScreenshotFunc = orig })
+
+	t.Run("portal success skips external tools", func(t *testing.T) {
+		marker := filepath.Join(t.TempDir(), "spectacle-ran")
+		installLinuxTestCommand(t, "spectacle", "touch '"+marker+"'; exit 9")
+		portalScreenshotFunc = func(context.Context) ([]byte, error) {
+			return []byte("PORTALIMG"), nil
+		}
+		img, err := captureScreenshot(context.Background())
+		if err != nil || string(img) != "PORTALIMG" {
+			t.Fatalf("got=%q, err=%v", img, err)
+		}
+		if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("spectacle should not run when Portal succeeds")
+		}
+	})
+
+	t.Run("portal user cancel does not fall back to external tools", func(t *testing.T) {
+		marker := filepath.Join(t.TempDir(), "spectacle-ran")
+		installLinuxTestCommand(t, "spectacle", "touch '"+marker+"'; printf 'SPECTACLE' > \"$6\"")
+		portalScreenshotFunc = func(context.Context) ([]byte, error) {
+			return nil, context.Canceled
+		}
+		img, err := captureScreenshot(context.Background())
+		if !errors.Is(err, context.Canceled) || len(img) != 0 {
+			t.Fatalf("got=%q, err=%v, want context.Canceled", img, err)
+		}
+		if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("spectacle must not run after Portal user cancel")
+		}
+	})
+
+	t.Run("portal error falls back to external tool", func(t *testing.T) {
+		installLinuxTestCommand(t, "spectacle", `printf 'SPECTACLEPNG' > "$6"`)
+		portalScreenshotFunc = func(context.Context) ([]byte, error) {
+			return nil, errors.New("portal service unavailable")
+		}
+		img, err := captureScreenshot(context.Background())
+		if err != nil || string(img) != "SPECTACLEPNG" {
+			t.Fatalf("fallback got=%q, err=%v", img, err)
+		}
+	})
 }

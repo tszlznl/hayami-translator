@@ -24,6 +24,15 @@ func TestEnabledProviders(t *testing.T) {
 	if providerConfigured(Provider{Kind: providerBaidu, AppID: "a"}, "") {
 		t.Error("Baidu without a secret should not be configured")
 	}
+	if !providerConfigured(Provider{Kind: providerOpenAI, BaseURL: "http://127.0.0.1:3430/v1", Model: "m"}, "") {
+		t.Error("loopback OpenAI-compatible endpoint should be configured without a key")
+	}
+	if !providerConfigured(Provider{Kind: providerOpenAI, BaseURL: "http://localhost:11434/v1", Model: "m"}, "") {
+		t.Error("localhost OpenAI-compatible endpoint should be configured without a key")
+	}
+	if providerConfigured(Provider{Kind: providerOpenAI, BaseURL: "https://api.openai.com/v1", Model: "m"}, "") {
+		t.Error("remote OpenAI-compatible endpoint without a key should not be configured")
+	}
 }
 
 func TestDefaultConfigHasOpenAIProvider(t *testing.T) {

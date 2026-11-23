@@ -23,9 +23,9 @@ func TranslateWithProvider(ctx context.Context, cfg config.Config, p config.Prov
 	case config.ProviderOpenAI:
 		return StreamOpenAI(ctx, cfg, p, key, messages, onDelta)
 	case config.ProviderAzure:
-		return translateAzure(ctx, cfg.TargetLang, p, key, source, onDelta)
+		return translateAzureWithSource(ctx, cfg.SourceLang, cfg.TargetLang, p, key, source, onDelta)
 	case config.ProviderBaidu:
-		return translateBaidu(ctx, cfg.TargetLang, p, key, source, onDelta)
+		return translateBaiduWithSource(ctx, cfg.SourceLang, cfg.TargetLang, p, key, source, onDelta)
 	default:
 		return &ConfigError{Message: "不支持的翻译服务：" + p.Kind}
 	}
@@ -74,7 +74,7 @@ func TranslateWithFallback(ctx context.Context, cfg config.Config, providers []c
 	return &ConfigError{Message: "没有可用的翻译服务"}
 }
 
-func azureRequestURL(p config.Provider, target string) (string, error) {
+func azureRequestURL(p config.Provider, sourceLang, target string) (string, error) {
 	endpoint := strings.TrimSpace(p.Endpoint)
 	if endpoint == "" {
 		endpoint = config.DefaultAzureEndpoint
@@ -89,19 +89,26 @@ func azureRequestURL(p config.Provider, target string) (string, error) {
 	}
 	q := u.Query()
 	q.Set("api-version", "3.0")
+	if from := config.AzureSourceLanguage(sourceLang); from != "" {
+		q.Set("from", from)
+	}
 	q.Set("to", config.AzureLanguage(target))
 	u.RawQuery = q.Encode()
 	return u.String(), nil
 }
 
 func translateAzure(ctx context.Context, target string, p config.Provider, key, source string, onDelta func(string)) error {
+	return translateAzureWithSource(ctx, "", target, p, key, source, onDelta)
+}
+
+func translateAzureWithSource(ctx context.Context, sourceLang, target string, p config.Provider, key, source string, onDelta func(string)) error {
 	if strings.TrimSpace(key) == "" {
 		return &ConfigError{Message: "还没有填写 Azure 翻译 Key，请在设置里填写"}
 	}
 	if strings.TrimSpace(source) == "" {
 		return &ConfigError{Message: "没有要翻译的文本"}
 	}
-	u, err := azureRequestURL(p, target)
+	u, err := azureRequestURL(p, sourceLang, target)
 	if err != nil {
 		return err
 	}
@@ -173,20 +180,26 @@ func baiduRequestURL(p config.Provider) string {
 }
 
 func translateBaidu(ctx context.Context, target string, p config.Provider, key, source string, onDelta func(string)) error {
-	if strings.TrimSpace(p.AppID) == "" || strings.TrimSpace(key) == "" {
+	return translateBaiduWithSource(ctx, "", target, p, key, source, onDelta)
+}
+
+func translateBaiduWithSource(ctx context.Context, sourceLang, target string, p config.Provider, key, source string, onDelta func(string)) error {
+	appID := strings.TrimSpace(p.AppID)
+	secret := strings.TrimSpace(key)
+	if appID == "" || secret == "" {
 		return &ConfigError{Message: "还没有填写百度翻译 APP ID 或密钥，请在设置里填写"}
 	}
 	if strings.TrimSpace(source) == "" {
 		return &ConfigError{Message: "没有要翻译的文本"}
 	}
 	salt := fmt.Sprintf("%d", time.Now().UnixNano())
-	sum := md5.Sum([]byte(p.AppID + source + salt + key))
+	sum := md5.Sum([]byte(appID + source + salt + secret))
 	sign := hex.EncodeToString(sum[:])
 	form := url.Values{
 		"q":     {source},
-		"from":  {"auto"},
+		"from":  {config.BaiduSourceLanguage(sourceLang)},
 		"to":    {config.BaiduLanguage(target)},
-		"appid": {p.AppID},
+		"appid": {appID},
 		"salt":  {salt},
 		"sign":  {sign},
 	}

@@ -31,6 +31,15 @@ const (
 	ThemeDark   = "dark"
 )
 
+const (
+	TTSBackendSystem = "system"
+	TTSBackendPiper  = "piper"
+	TTSBackendOpenAI = "openai"
+
+	TTSFormatMP3 = "mp3"
+	TTSFormatWAV = "wav"
+)
+
 // Mode kinds: material treats the first user message as text to process;
 // instruction treats it as the user's own question or command.
 const (
@@ -83,6 +92,19 @@ type Config struct {
 	// configs keep working.
 	Providers           []Provider `json:"providers,omitempty"`
 	ProvidersConfigured bool       `json:"providersConfigured,omitempty"`
+
+	// HistoryLimit caps the number of history entries retained in SQLite.
+	// Zero or negative uses DefaultHistoryLimit (1000).
+	HistoryLimit int `json:"historyLimit,omitempty"`
+
+	// Optional TTS backend settings ("system", "piper", "openai").
+	TTSBackend    string `json:"ttsBackend,omitempty"`
+	TTSPiperPath  string `json:"ttsPiperPath,omitempty"`
+	TTSPiperModel string `json:"ttsPiperModel,omitempty"`
+	TTSBaseURL    string `json:"ttsBaseURL,omitempty"`
+	TTSModel      string `json:"ttsModel,omitempty"`
+	TTSVoice      string `json:"ttsVoice,omitempty"`
+	TTSFormat     string `json:"ttsFormat,omitempty"`
 }
 
 func Default() Config {
@@ -99,7 +121,6 @@ func Default() Config {
 		Temperature:      0.3,
 		MaxTokens:        2048,
 		PopupPinned:      false,
-		TriggerMode:      TriggerModeIcon,
 		Theme:            ThemeSystem,
 		ActiveMode:       "translate",
 	}
@@ -191,25 +212,20 @@ func (c *Config) SyncLegacy() {
 	}
 }
 
-// NormalizeProviders fills the defaults of providers loaded from JSON and
-// drops duplicate IDs. It does not add a provider to an intentionally empty
-// list.
+// NormalizeProviders fills defaults for missing fields on providers loaded
+// from JSON without silently rewriting invalid kinds or duplicate IDs so that
+// Validate can still report them explicitly.
 func (c *Config) NormalizeProviders() {
-	seen := map[string]bool{}
 	out := make([]Provider, 0, len(c.Providers))
 	for _, p := range c.Providers {
 		p.Kind = strings.TrimSpace(p.Kind)
 		if p.Kind == "" {
 			p.Kind = ProviderOpenAI
 		}
-		if p.Kind != ProviderOpenAI && p.Kind != ProviderAzure && p.Kind != ProviderBaidu {
-			p.Kind = ProviderOpenAI
-		}
 		p.ID = strings.TrimSpace(p.ID)
-		if p.ID == "" || seen[p.ID] {
+		if p.ID == "" {
 			p.ID = NextProviderID(Config{Providers: out}, p.Kind)
 		}
-		seen[p.ID] = true
 		p.Name = strings.TrimSpace(p.Name)
 		if p.Name == "" {
 			p.Name = DefaultProviderName(p.Kind)
@@ -285,12 +301,12 @@ func Load() (Config, error) {
 	if err != nil {
 		return Default(), err
 	}
-	cfg.FillDefaults()
 	migrated := false
-	if cfg.Schema == "" {
+	if strings.TrimSpace(cfg.Schema) == "" {
 		cfg.Schema = SchemaRef
 		migrated = true
 	}
+	cfg.FillDefaults()
 	if !cfg.ProvidersConfigured {
 		if len(cfg.Providers) > 0 {
 			cfg.ProvidersConfigured = true
@@ -336,9 +352,6 @@ func (c *Config) FillDefaults() {
 	if strings.TrimSpace(c.InputHotkey) == "" {
 		c.InputHotkey = d.InputHotkey
 	}
-	if strings.TrimSpace(c.TriggerMode) == "" {
-		c.TriggerMode = d.TriggerMode
-	}
 	if strings.TrimSpace(c.Theme) == "" {
 		c.Theme = d.Theme
 	}
@@ -355,7 +368,7 @@ func (c *Config) FillDefaults() {
 		m.Name = strings.TrimSpace(m.Name)
 		m.Prompt = strings.TrimSpace(m.Prompt)
 		m.Kind = strings.TrimSpace(m.Kind)
-		if m.Kind != ModeInstruction {
+		if m.Kind == "" {
 			m.Kind = ModeMaterial
 		}
 		if m.Name == "" {

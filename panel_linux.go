@@ -6,20 +6,65 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 func panelNeedsBackdrop() bool { return os.Getenv("WAYLAND_DISPLAY") != "" }
+
+var panelLocCache struct {
+	mu        sync.Mutex
+	checkedAt time.Time
+	modTime   time.Time
+	path      string
+	edge      panelEdge
+	screen    int
+	valid     bool
+}
 
 func desktopPanelLocation() (panelEdge, int) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return panelBottom, 0
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "plasma-org.kde.plasma.desktop-appletsrc"))
-	if err != nil {
+	path := filepath.Join(dir, "plasma-org.kde.plasma.desktop-appletsrc")
+	now := time.Now()
+
+	panelLocCache.mu.Lock()
+	defer panelLocCache.mu.Unlock()
+
+	if panelLocCache.path == path && now.Sub(panelLocCache.checkedAt) < 2*time.Second {
+		if panelLocCache.valid {
+			return panelLocCache.edge, panelLocCache.screen
+		}
 		return panelBottom, 0
 	}
-	return plasmaPanelLocation(string(data))
+
+	panelLocCache.path = path
+	panelLocCache.checkedAt = now
+
+	info, err := os.Stat(path)
+	if err != nil {
+		panelLocCache.valid = false
+		panelLocCache.modTime = time.Time{}
+		return panelBottom, 0
+	}
+	if panelLocCache.valid && info.ModTime().Equal(panelLocCache.modTime) {
+		return panelLocCache.edge, panelLocCache.screen
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		panelLocCache.valid = false
+		panelLocCache.modTime = time.Time{}
+		return panelBottom, 0
+	}
+	edge, screen := plasmaPanelLocation(string(data))
+	panelLocCache.modTime = info.ModTime()
+	panelLocCache.edge = edge
+	panelLocCache.screen = screen
+	panelLocCache.valid = true
+	return edge, screen
 }
 
 func plasmaPanelLocation(data string) (panelEdge, int) {

@@ -4,14 +4,19 @@ import (
 	"context"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
 func TestLinuxSpeechCommandUsesStdin(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux speech command")
+	}
+	if _, err := exec.LookPath("espeak-ng"); err != nil {
+		t.Skip("espeak-ng not installed")
 	}
 	text := "引号 ' \"\n$(touch /never-run); --voices <speak>literal text</speak>"
 	cmd, err := speechCommand(context.Background(), text)
@@ -33,10 +38,30 @@ func TestLinuxSpeechCommandUsesStdin(t *testing.T) {
 	}
 }
 
+func TestLinuxSpeechCommandChineseAndMissingBinary(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux speech command")
+	}
+	if _, err := exec.LookPath("espeak-ng"); err == nil {
+		cmd, err := speechCommand(context.Background(), "你好，世界")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"espeak-ng", "-v", "cmn", "--stdin"}; !reflect.DeepEqual(cmd.Args, want) {
+			t.Fatalf("chinese args = %q, want %q", cmd.Args, want)
+		}
+	}
+	t.Setenv("PATH", filepath.Join(t.TempDir(), "empty-bin"))
+	_, err := speechCommand(context.Background(), "hello")
+	if err == nil || !strings.Contains(err.Error(), "espeak-ng") {
+		t.Fatalf("expected missing espeak-ng error, got %v", err)
+	}
+}
+
 func TestSpeechPlaybackStopsBeforeCommandStarts(t *testing.T) {
 	var playback speechPlayback
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, "powershell.exe")
+	cmd := exec.CommandContext(ctx, "espeak-ng")
 	playback.begin(cmd, cancel)
 
 	if !playback.active() {
@@ -75,5 +100,35 @@ func TestSpeechPlaybackIgnoresStaleCompletion(t *testing.T) {
 	}
 	if newCtx.Err() == nil {
 		t.Fatal("finishing the current command must release its context")
+	}
+}
+
+func TestDetectSpeechVoiceAndAudioValidation(t *testing.T) {
+	cases := []struct {
+		text string
+		want string
+	}{
+		{"Good morning", ""},
+		{"你好，世界", "cmn"},
+		{"こんにちは世界", "ja"},
+		{"안녕하세요", "ko"},
+		{"Привет мир", "ru"},
+		{"مرحبا", "ar"},
+		{"สวัสดี", "th"},
+	}
+	for _, tc := range cases {
+		if got := detectSpeechVoice(tc.text); got != tc.want {
+			t.Errorf("detectSpeechVoice(%q) = %q, want %q", tc.text, got, tc.want)
+		}
+	}
+
+	if isValidAudioPayload([]byte("corrupt-audio-bytes"), "mp3") {
+		t.Fatal("corrupt bytes must not pass MP3 validation")
+	}
+	if isValidAudioPayload([]byte("corrupt-audio-bytes"), "wav") {
+		t.Fatal("corrupt bytes must not pass WAV validation")
+	}
+	if !isValidAudioPayload([]byte{0xff, 0xfb, 0x10, 0xc0}, "mp3") {
+		t.Fatal("valid MPEG-1 Layer III frame sync must pass MP3 validation")
 	}
 }

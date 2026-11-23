@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -73,12 +74,27 @@ func SecretKey(p Provider) string {
 	return "provider." + p.ID
 }
 
+// IsLoopbackURL reports whether raw points to a local loopback host where an
+// OpenAI-compatible gateway often runs without requiring an API key.
+func IsLoopbackURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
 func Configured(p Provider, key string) bool {
 	switch p.Kind {
 	case ProviderOpenAI:
 		return strings.TrimSpace(p.BaseURL) != "" &&
 			strings.TrimSpace(p.Model) != "" &&
-			strings.TrimSpace(key) != ""
+			(strings.TrimSpace(key) != "" || IsLoopbackURL(p.BaseURL))
 	case ProviderAzure:
 		return strings.TrimSpace(key) != ""
 	case ProviderBaidu:
@@ -108,6 +124,20 @@ func (c Config) EnabledProviders(forImage bool) []Provider {
 			continue
 		}
 		if forImage && (p.Kind != ProviderOpenAI || !p.Vision) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// EnabledPromptProviders returns the enabled OpenAI Compatible services that
+// understand arbitrary prompt presets (polish/summarize/explain) and follow-up
+// turns. Pure machine-translation APIs (Azure/Baidu) are excluded.
+func (c Config) EnabledPromptProviders() []Provider {
+	out := make([]Provider, 0, len(c.Providers))
+	for _, p := range c.Providers {
+		if !p.Enabled || p.Kind != ProviderOpenAI {
 			continue
 		}
 		out = append(out, p)
@@ -146,6 +176,14 @@ func AzureLanguage(target string) string {
 	return target
 }
 
+func AzureSourceLanguage(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" || source == "自动检测" {
+		return ""
+	}
+	return AzureLanguage(source)
+}
+
 func BaiduLanguage(target string) string {
 	m := map[string]string{
 		"简体中文": "zh", "繁體中文": "cht", "English": "en",
@@ -157,6 +195,14 @@ func BaiduLanguage(target string) string {
 		return v
 	}
 	return target
+}
+
+func BaiduSourceLanguage(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" || source == "自动检测" {
+		return "auto"
+	}
+	return BaiduLanguage(source)
 }
 
 func BaiduErrorMessage(code string) string {

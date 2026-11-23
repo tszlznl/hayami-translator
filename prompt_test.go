@@ -154,7 +154,7 @@ func TestFollowUpMessagesKeepContext(t *testing.T) {
 	cfg := defaultConfig()
 	mode := config.Mode{ID: "translate", Prompt: "翻译成{{target}}", Kind: config.ModeMaterial}
 
-	msgs := followUpMessages(cfg, mode, "hello", "你好", "再短一点")
+	msgs := followUpMessages(cfg, mode, "hello", "你好", nil, "再短一点")
 	if len(msgs) != 4 {
 		t.Fatalf("messages = %d, want 4", len(msgs))
 	}
@@ -164,6 +164,16 @@ func TestFollowUpMessagesKeepContext(t *testing.T) {
 	system, _ := msgs[0].Content.(string)
 	if !strings.Contains(system, followUpContract) || !strings.Contains(system, `"task":"follow_up"`) {
 		t.Fatalf("follow-up contract missing: %q", system)
+	}
+
+	multi := followUpMessages(cfg, mode, "hello", "你好", []promptFollowUpTurn{
+		{Question: "再短一点", Answer: "嗨"},
+	}, "更正式")
+	if len(multi) != 6 {
+		t.Fatalf("multi messages = %d, want 6", len(multi))
+	}
+	if multi[3].Content != "再短一点" || multi[4].Content != "嗨" || multi[5].Content != "更正式" {
+		t.Fatalf("multi messages = %#v", multi)
 	}
 }
 

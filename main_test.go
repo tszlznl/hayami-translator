@@ -113,6 +113,11 @@ func TestParseCLIAction(t *testing.T) {
 		{[]string{"--settings"}, "settings"},
 		{[]string{"-t"}, "toggle"},
 		{[]string{"--toggle"}, "toggle"},
+		{[]string{"-b"}, "silent"},
+		{[]string{"--silent"}, "silent"},
+		{[]string{"--background"}, "silent"},
+		{[]string{"--autostart"}, "silent"},
+		{[]string{"--minimized"}, "silent"},
 		{[]string{"--foo", "-s", "--bar"}, "selection"},
 	}
 	for _, tc := range cases {

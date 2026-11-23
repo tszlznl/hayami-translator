@@ -15,8 +15,13 @@ type imageURLPart = llm.ImageURLPart
 type httpStatusError = llm.HTTPStatusError
 type serviceError = llm.ServiceError
 type configError = llm.ConfigError
+type probeReport = llm.ProbeReport
 
 func explainError(err error) (string, string) { return llm.ExplainError(err) }
+
+func probeProvider(ctx context.Context, cfg Config, p Provider, key string) probeReport {
+	return llm.ProbeProvider(ctx, cfg, p, key)
+}
 
 func chatEndpoint(base string) string { return llm.ChatEndpoint(base) }
 

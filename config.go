@@ -8,12 +8,6 @@ import "hayami/internal/config"
 type Config = config.Config
 type Provider = config.Provider
 
-const (
-	triggerModeIcon   = config.TriggerModeIcon
-	triggerModeBubble = config.TriggerModeBubble
-	triggerModePopup  = config.TriggerModePopup
-)
-
 func defaultConfig() Config { return config.Default() }
 
 func configPath() (string, error) { return config.Path() }

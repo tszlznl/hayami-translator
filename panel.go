@@ -31,31 +31,36 @@ func (a *app) panelView(c *ui.Context) {
 	panelBackground(c, t)
 	c.OnShortcut(0, ui.KeyEscape, a.requestClosePanel)
 
-	rad := float32(12)
+	tabRad := float32(6)
 	if isKDE() {
-		rad = 8
+		tabRad = 4
 	}
 
-	ui.Column(c).Fill().Radius(rad).Border(1, pal.Border).Children(func() {
-		ui.Row(c).Height(38).Padding(4, 10).Gap(4).AlignItems(ui.Center).
-			BorderWidth(0, 0, 1, 0).BorderColor(pal.Border).Children(func() {
+	ui.Column(c).Fill().Children(func() {
+		ui.Row(c).Height(38).Padding(0, 10).Gap(4).AlignItems(ui.Center).
+			Background(pal.Header).BorderWidth(0, 0, 1, 0).BorderColor(pal.Border).
+			DragWindow().Children(func() {
 			for page, label := range []string{"翻译", "输入", "历史", "设置"} {
 				page := panelPage(page)
-				tab := ui.ButtonBase(c.Key(page)).Height(28).Padding(0, 10).Radius(5).
+				tab := ui.ButtonBase(c.Key(page)).Height(28).Padding(0, 10).Radius(tabRad).
 					AlignItems(ui.Center).Justify(ui.Center).
 					Tooltip(label + "页").
 					OnClick(func() { a.openPanelPage(page) })
 				if a.panelPage == page {
-					tab.Background(pal.Accent.Alpha(0.18)).Border(1, pal.Accent.Alpha(0.40))
+					if isKDE() {
+						tab.Background(pal.Accent.Alpha(0.20)).Border(1, pal.Accent.Alpha(0.55))
+					} else {
+						tab.Background(pal.Accent.Alpha(0.18)).Border(1, pal.Accent.Alpha(0.40))
+					}
 					tab.Children(func() {
-						ui.Text(c, label).FontSize(12).Bold().TextColor(pal.Accent)
+						ui.Text(c, label).FontSize(12).Bold().TextColor(pal.Accent).SingleLine()
 					})
 				} else {
 					if tab.Hovered() {
 						tab.Background(pal.SurfaceHover)
 					}
 					tab.Children(func() {
-						ui.Text(c, label).FontSize(12).TextColor(pal.TextSecondary)
+						ui.Text(c, label).FontSize(12).TextColor(pal.TextSecondary).SingleLine()
 					})
 				}
 			}
@@ -66,12 +71,12 @@ func (a *app) panelView(c *ui.Context) {
 			}
 			pin := win11IconButton(c, iconPin, tip).Label(tip)
 			if a.popupPinned {
-				pin.Background(pal.Accent.Alpha(0.20)).Border(1, pal.Accent.Alpha(0.40))
+				pin.Background(pal.Accent.Alpha(0.20)).Border(1, pal.Accent.Alpha(0.45))
 			}
 			pin.OnClick(func() { a.setPanelPinned(!a.popupPinned) })
 			win11IconButton(c, iconClose, "收起面板 (Esc)").Label("收起面板").OnClick(a.requestClosePanel)
 		})
-		ui.Column(c.Key(a.panelPage)).Grow(1).Children(func() {
+		ui.Column(c.Key(a.panelPage)).Grow(1).MinHeight(0).Children(func() {
 			switch a.panelPage {
 			case panelTranslation:
 				a.popupView(c)
@@ -104,6 +109,28 @@ func (a *app) createPanelBackdrops() {
 		backdrop.SetBounds(display.Bounds)
 		backdrop.OnClose(func(e *mygo.CloseEvent) { a.handleWindowClose(e, a.requestClosePanel) })
 		a.panelBackdrops = append(a.panelBackdrops, backdrop)
+	}
+}
+
+func (a *app) rebuildPanelBackdrops() {
+	for _, b := range a.panelBackdrops {
+		b.Destroy()
+	}
+	a.panelBackdrops = nil
+	a.createPanelBackdrops()
+}
+
+func (a *app) onDisplaysChanged() {
+	if a.quitting {
+		return
+	}
+	if panelNeedsBackdrop() {
+		a.rebuildPanelBackdrops()
+	}
+	if a.popup != nil && a.popup.IsVisible() {
+		// Re-show the panel after rebuilding backdrops so the overlay panel
+		// always stays stacked above the newly created backdrop windows.
+		a.showPanel(a.panelPage)
 	}
 }
 
@@ -198,6 +225,9 @@ func (a *app) desiredPanelSize() (int, int) {
 		sourceLen := len([]rune(strings.TrimSpace(a.source)))
 		resultLen := len([]rune(strings.TrimSpace(a.result)))
 		followUpLen := len([]rune(strings.TrimSpace(a.followUp)))
+		for _, turn := range a.followUpTurns {
+			followUpLen += len([]rune(strings.TrimSpace(turn.Question))) + len([]rune(strings.TrimSpace(turn.Answer)))
+		}
 
 		totalLen := sourceLen + resultLen + followUpLen
 
@@ -218,6 +248,10 @@ func (a *app) desiredPanelSize() (int, int) {
 		if a.showFollowUp() {
 			h += 48
 		}
+		if a.dictEntry != nil {
+			dictH := 56 + min(4, len(a.dictEntry.Meanings))*20
+			h = max(h, 230) + dictH
+		}
 		if a.multiEngine && len(a.results) > 1 {
 			h = min(500, max(h, 400))
 		}
@@ -227,15 +261,22 @@ func (a *app) desiredPanelSize() (int, int) {
 	}
 }
 
-func (a *app) placePanel() {
-	edge, screen := desktopPanelLocation()
-	display := mygo.Screen.PrimaryDisplay()
-	for _, d := range mygo.Screen.Displays() {
+func pickDisplay(displays []mygo.Display, primary mygo.Display, screen int) mygo.Display {
+	for _, d := range displays {
 		if d.ID == int64(screen) {
-			display = d
-			break
+			return d
 		}
 	}
+	if screen >= 0 && screen < len(displays) {
+		return displays[screen]
+	}
+	return primary
+}
+
+func (a *app) placePanel() {
+	edge, screen := desktopPanelLocation()
+	displays := mygo.Screen.Displays()
+	display := pickDisplay(displays, mygo.Screen.PrimaryDisplay(), screen)
 	var anchor mygo.Rectangle
 	if tray, ok := a.tray.(interface{ Bounds() mygo.Rectangle }); ok {
 		anchor = tray.Bounds()

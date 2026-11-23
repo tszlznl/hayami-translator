@@ -51,7 +51,8 @@ type msllHookStruct struct {
 	DwExtraInfo uintptr
 }
 
-// winMSG is MSG. It is only used to pump the hook thread's message queue.
+// winMSG is MSG (48 bytes on 64-bit Windows). It is only used to pump the hook
+// thread's message queue.
 type winMSG struct {
 	HWnd     uintptr
 	Message  uint32
@@ -62,6 +63,11 @@ type winMSG struct {
 	Pt       mousePoint
 	LPrivate uint32
 }
+
+const (
+	_ = uint(unsafe.Sizeof(winMSG{}) - 48)
+	_ = uint(48 - unsafe.Sizeof(winMSG{}))
+)
 
 type mouseEvent struct {
 	message uintptr
@@ -85,7 +91,6 @@ var (
 	procGetAncestor         = user32.NewProc("GetAncestor")
 	procGetParent           = user32.NewProc("GetParent")
 	procGetClassNameW       = user32.NewProc("GetClassNameW")
-	procGetWindowTextW      = user32.NewProc("GetWindowTextW")
 	procWindowFromPoint     = user32.NewProc("WindowFromPoint")
 	procGetClientRect       = user32.NewProc("GetClientRect")
 	procClientToScreen      = user32.NewProc("ClientToScreen")
@@ -105,7 +110,10 @@ var (
 	hookThreadID uint32
 	hookDoneCh   chan struct{}
 
-	hookProc uintptr
+	hookProcOnce sync.Once
+	hookProc     uintptr
+	hookSinkMu   sync.RWMutex
+	hookSink     chan<- mouseEvent
 
 	captureMu sync.Mutex
 	dragSeq   atomic.Uint64
@@ -173,19 +181,37 @@ func runMouseHook(events chan<- mouseEvent, ready chan<- hookStart, done chan<- 
 	runtime.LockOSThread()
 	defer close(done)
 
-	hookProc = windows.NewCallback(func(nCode, wParam, lParam uintptr) uintptr {
-		if int32(nCode) >= 0 {
-			switch uint32(wParam) {
-			case wmLButtonDown, wmLButtonUp, wmRButtonDown, wmMButtonDown, wmMouseWheel:
-				info := (*msllHookStruct)(pointerFromUintptr(lParam))
-				select {
-				case events <- mouseEvent{message: wParam, pt: info.Pt}:
-				default:
+	hookSinkMu.Lock()
+	hookSink = events
+	hookSinkMu.Unlock()
+	defer func() {
+		hookSinkMu.Lock()
+		if hookSink == events {
+			hookSink = nil
+		}
+		hookSinkMu.Unlock()
+	}()
+
+	hookProcOnce.Do(func() {
+		hookProc = windows.NewCallback(func(nCode, wParam, lParam uintptr) uintptr {
+			if int32(nCode) >= 0 {
+				switch uint32(wParam) {
+				case wmLButtonDown, wmLButtonUp, wmRButtonDown, wmMButtonDown, wmMouseWheel:
+					info := (*msllHookStruct)(pointerFromUintptr(lParam))
+					hookSinkMu.RLock()
+					sink := hookSink
+					if sink != nil {
+						select {
+						case sink <- mouseEvent{message: wParam, pt: info.Pt}:
+						default:
+						}
+					}
+					hookSinkMu.RUnlock()
 				}
 			}
-		}
-		r, _, _ := procCallNextHookEx.Call(0, nCode, wParam, lParam)
-		return r
+			r, _, _ := procCallNextHookEx.Call(0, nCode, wParam, lParam)
+			return r
+		})
 	})
 
 	hmod, _, _ := procGetModuleHandleW.Call(0)
@@ -236,11 +262,6 @@ func processMouseEvents(a *app, events <-chan mouseEvent) {
 			// Any new press invalidates a read that is still in flight.
 			dragSeq.Add(1)
 			down = nil
-			if pointInToolbar(ev.pt) {
-				// The press has to reach the button; hiding the panel now
-				// would cancel the click.
-				continue
-			}
 			if pointInOurApp(ev.pt) || !selectionToolbarEnabled.Load() {
 				continue
 			}
@@ -279,7 +300,8 @@ func processMouseEvents(a *app, events <-chan mouseEvent) {
 					pointInOurApp(ev.pt), foregroundIsOurs(), ctrlOrAltDown())
 				continue
 			}
-			if blockedWindowAt(start.pt) {
+			nonText, terminal := windowClassPolicyAt(start.pt)
+			if nonText {
 				hookLog("gesture rejected: blocked window")
 				continue
 			}
@@ -288,7 +310,7 @@ func processMouseEvents(a *app, events <-chan mouseEvent) {
 				continue
 			}
 			gen := dragSeq.Load()
-			go captureToolbarSelection(a, gen, hwnd)
+			go captureToolbarSelection(a, gen, hwnd, terminal)
 
 		case wmRButtonDown, wmMButtonDown, wmMouseWheel:
 			dragSeq.Add(1)
@@ -299,8 +321,10 @@ func processMouseEvents(a *app, events <-chan mouseEvent) {
 
 // captureToolbarSelection runs off the hook thread. Reading the selection
 // takes a few hundred milliseconds, so every check is repeated after it: a
-// new click or a foreground change cancels this particular toolbar.
-func captureToolbarSelection(a *app, gen uint64, hwnd uintptr) {
+// new click or a foreground change cancels this particular toolbar. When
+// uiaOnly is true (e.g., terminal windows), only UI Automation is queried so
+// Ctrl+C is never injected into a running shell command.
+func captureToolbarSelection(a *app, gen uint64, hwnd uintptr, uiaOnly bool) {
 	time.Sleep(140 * time.Millisecond)
 	if !selectionToolbarEnabled.Load() || dragSeq.Load() != gen {
 		return
@@ -308,13 +332,21 @@ func captureToolbarSelection(a *app, gen uint64, hwnd uintptr) {
 	if foregroundWindow() != hwnd {
 		return
 	}
-	hookLog("capture hwnd=%d", hwnd)
+	hookLog("capture hwnd=%d uiaOnly=%v", hwnd, uiaOnly)
 	captureMu.Lock()
 	defer captureMu.Unlock()
 	if !selectionToolbarEnabled.Load() || dragSeq.Load() != gen {
 		return
 	}
-	text, err := readSelectedText()
+	var (
+		text string
+		err  error
+	)
+	if uiaOnly {
+		text, err = readSelectedTextUIA()
+	} else {
+		text, err = readSelectedText()
+	}
 	if err != nil || strings.TrimSpace(text) == "" {
 		hookLog("capture empty: err=%v len=%d", err, len(text))
 		return
@@ -364,22 +396,6 @@ func rootWindowAt(pt mousePoint) uintptr {
 		return h
 	}
 	return r
-}
-
-// pointInToolbar identifies the panel by its window title. Comparing window
-// bounds would mix DIPs from mygo with the physical points from the hook.
-func pointInToolbar(pt mousePoint) bool {
-	h := windowFromPoint(pt)
-	if h == 0 || windowProcessID(h) != uint32(os.Getpid()) {
-		return false
-	}
-	root, _, _ := procGetAncestor.Call(h, gaRoot)
-	if root == 0 {
-		root = h
-	}
-	var buf [64]uint16
-	n, _, _ := procGetWindowTextW.Call(root, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-	return n > 0 && windows.UTF16ToString(buf[:int(n)]) == "划词助手"
 }
 
 func pointInOurApp(pt mousePoint) bool {
@@ -436,36 +452,70 @@ func clientAreaAt(pt mousePoint) bool {
 	return pt.X >= origin.X && pt.X < right && pt.Y >= origin.Y && pt.Y < bottom
 }
 
-func blockedWindowAt(pt mousePoint) bool {
+func windowClassPolicyAt(pt mousePoint) (nonText bool, terminal bool) {
 	h := windowFromPoint(pt)
 	for i := 0; h != 0 && i < 8; i++ {
 		var buf [256]uint16
 		n, _, _ := procGetClassNameW.Call(h, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 		if n > 0 {
 			class := strings.ToLower(windows.UTF16ToString(buf[:int(n)]))
-			if blockedWindowClass(class) {
-				return true
+			nt, term := windowClassPolicy(class)
+			if nt {
+				return true, false
+			}
+			if term {
+				terminal = true
 			}
 		}
 		parent, _, _ := procGetParent.Call(h)
 		h = parent
 	}
-	return false
+	return false, terminal
 }
 
-// blockedWindowClass lists windows where a drag is not a text selection, or
-// where Ctrl+C has a destructive meaning. Terminals are the important case:
-// sending Ctrl+C to one interrupts the running command.
-func blockedWindowClass(class string) bool {
+func blockedWindowAt(pt mousePoint) bool {
+	nonText, terminal := windowClassPolicyAt(pt)
+	return nonText || terminal
+}
+
+func nonTextWindowClass(class string) bool {
 	switch class {
-	case "consolewindowclass", "cascadia_hosting_window_class",
-		"virtualconsoleclass", "mintty", "putty",
-		"syslistview32", "systreeview32", "listbox",
+	case "syslistview32", "systreeview32", "listbox",
 		"shell_traywnd", "shell_secondarytraywnd", "mstasklistwclass",
 		"progman", "workerw", "scrollbar", "toolbarwindow32":
 		return true
 	}
 	return false
+}
+
+// terminalWindowClass identifies terminal hosts where sending Ctrl+C would
+// send SIGINT to the running command, so only non-destructive UIA selection
+// capture is permitted.
+func terminalWindowClass(class string) bool {
+	switch class {
+	case "consolewindowclass", "cascadia_hosting_window_class",
+		"virtualconsoleclass", "mintty", "putty":
+		return true
+	}
+	return false
+}
+
+func windowClassPolicy(class string) (nonText bool, terminal bool) {
+	class = strings.ToLower(strings.TrimSpace(class))
+	if nonTextWindowClass(class) {
+		return true, false
+	}
+	if terminalWindowClass(class) {
+		return false, true
+	}
+	return false, false
+}
+
+// blockedWindowClass reports whether Ctrl+C selection capture is disallowed for
+// the window class (either non-text chrome or terminals).
+func blockedWindowClass(class string) bool {
+	nonText, terminal := windowClassPolicy(class)
+	return nonText || terminal
 }
 
 func windowFromPoint(pt mousePoint) uintptr {

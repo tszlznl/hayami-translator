@@ -2,10 +2,39 @@ package main
 
 import (
 	"context"
+	"log"
 	"math"
 	"strings"
 	"time"
 )
+
+func toHistoryFollowUpTurns(turns []promptFollowUpTurn) []historyFollowUpTurn {
+	if len(turns) == 0 {
+		return nil
+	}
+	out := make([]historyFollowUpTurn, len(turns))
+	for i, t := range turns {
+		out[i] = historyFollowUpTurn{
+			Question: t.Question,
+			Answer:   t.Answer,
+		}
+	}
+	return out
+}
+
+func fromHistoryFollowUpTurns(turns []historyFollowUpTurn) []promptFollowUpTurn {
+	if len(turns) == 0 {
+		return nil
+	}
+	out := make([]promptFollowUpTurn, len(turns))
+	for i, t := range turns {
+		out[i] = promptFollowUpTurn{
+			Question: t.Question,
+			Answer:   t.Answer,
+		}
+	}
+	return out
+}
 
 // cancelFollowUp stops an in-flight follow-up and invalidates its callbacks.
 func (a *app) cancelFollowUp() {
@@ -26,32 +55,39 @@ func (a *app) canFollowUp() bool {
 }
 
 func (a *app) showFollowUp() bool {
-	return a.canFollowUp() || a.followUpStreaming || strings.TrimSpace(a.followUp) != ""
+	return a.canFollowUp() || a.followUpStreaming || len(a.followUpTurns) > 0 || strings.TrimSpace(a.followUp) != ""
 }
 
 // submitPopup routes Ctrl+Enter: a non-empty follow-up question continues the
 // current result, everything else starts a new translation.
 func (a *app) submitPopup() {
-	if strings.TrimSpace(a.followUpInput) != "" && !a.streaming && !a.multiEngine && strings.TrimSpace(a.result) != "" {
+	if a.streaming {
+		return
+	}
+	if strings.TrimSpace(a.followUpInput) != "" && a.canFollowUp() {
 		a.sendFollowUp()
 		return
 	}
-	a.startTranslation()
+	if !a.followUpStreaming {
+		a.startTranslation()
+	}
 }
 
 func (a *app) sendFollowUp() {
 	question := strings.TrimSpace(a.followUpInput)
-	if question == "" || a.hasImage || a.multiEngine || a.streaming || strings.TrimSpace(a.result) == "" {
+	if question == "" || !a.canFollowUp() {
 		return
 	}
 
+	a.ensureProviderKeysLoaded()
 	a.cancelFollowUp()
 	cfg := a.cfg
 	source := a.source
 	result := a.result
-	messages := followUpMessages(cfg, a.currentMode(), source, result, question)
+	cfg.TargetLang = effectiveTarget(a.effectivePopupTarget(), source)
+	messages := followUpMessages(cfg, a.currentMode(), source, result, a.followUpTurns, question)
 
-	providers := cfg.EnabledProviders(false)
+	providers := cfg.EnabledPromptProviders()
 	configured := providers[:0]
 	for _, p := range providers {
 		if providerConfigured(p, p.Key) {
@@ -60,7 +96,7 @@ func (a *app) sendFollowUp() {
 	}
 	providers = configured
 	if len(providers) == 0 {
-		a.followUpErr = "没有可用的翻译服务"
+		a.followUpErr = "追问需要启用一个配置好的 OpenAI Compatible 服务"
 		return
 	}
 
@@ -69,6 +105,7 @@ func (a *app) sendFollowUp() {
 	a.followUp = ""
 	a.followUpErr = ""
 	a.followUpStreaming = true
+	a.popupAutoScroll = true
 	a.popupScroll.Y = math.MaxFloat32
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -77,14 +114,17 @@ func (a *app) sendFollowUp() {
 	id := a.followUpReqID
 
 	go func() {
+		defer cancel()
 		var pending strings.Builder
+		flushedFirst := false
 		flush := func() {
 			if pending.Len() == 0 {
 				return
 			}
 			chunk := pending.String()
 			pending.Reset()
-			a.popup.Update(func() {
+			flushedFirst = true
+			a.postUI(func() {
 				if a.followUpReqID == id {
 					a.followUp += chunk
 				}
@@ -94,23 +134,46 @@ func (a *app) sendFollowUp() {
 
 		err := translateWithFallback(ctx, cfg, providers, messages, source, nil, func(delta string) {
 			pending.WriteString(delta)
-			if time.Since(last) >= 30*time.Millisecond {
+			if !flushedFirst || time.Since(last) >= 30*time.Millisecond {
 				flush()
 				last = time.Now()
 			}
 		})
 		flush()
+		wasCanceled := ctx.Err() != nil
 
-		a.popup.Update(func() {
+		a.postUI(func() {
 			if a.followUpReqID != id {
 				return
 			}
 			a.followUpStreaming = false
-			if err != nil && ctx.Err() == nil {
+			if err != nil && !wasCanceled {
 				title, hint := explainError(err)
 				a.followUpErr = title
 				if hint != "" {
 					a.followUpErr += "。" + hint
+				}
+				return
+			}
+			if !wasCanceled && strings.TrimSpace(a.followUp) != "" {
+				a.followUpTurns = append(a.followUpTurns, promptFollowUpTurn{
+					Question: a.followUpQ,
+					Answer:   a.followUp,
+				})
+				a.followUpQ = ""
+				a.followUp = ""
+				a.followUpErr = ""
+
+				if a.store != nil && a.activeHistoryID > 0 {
+					histID := a.activeHistoryID
+					turns := toHistoryFollowUpTurns(a.followUpTurns)
+					go func() {
+						if err := a.store.UpdateFollowUps(histID, turns); err != nil {
+							log.Print("history follow-up update: ", err)
+							return
+						}
+						a.refreshHistory()
+					}()
 				}
 			}
 		})

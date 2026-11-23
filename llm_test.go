@@ -104,6 +104,32 @@ func TestEmptyAPIKey(t *testing.T) {
 	}
 }
 
+func TestLoopbackEmptyAPIKey(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	cfg := defaultConfig()
+	cfg.BaseURL = srv.URL + "/v1"
+	var out strings.Builder
+	if err := streamChat(context.Background(), cfg, "", textMessages(cfg, "hi"), func(s string) {
+		out.WriteString(s)
+	}); err != nil {
+		t.Fatalf("loopback streamChat without key failed: %v", err)
+	}
+	if out.String() != "ok" {
+		t.Fatalf("got %q, want ok", out.String())
+	}
+	if gotAuth != "" {
+		t.Fatalf("expected empty Authorization header when key is empty, got %q", gotAuth)
+	}
+}
+
 func TestStreamChatPrematureClose(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

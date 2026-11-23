@@ -45,10 +45,23 @@ var httpClient = &http.Client{
 		if len(via) >= 10 {
 			return fmt.Errorf("重定向次数过多")
 		}
-		// Do not forward sensitive authorization headers across domains.
-		if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+		// Do not forward sensitive authorization headers across domains or on
+		// HTTPS-to-HTTP downgrades (including multi-hop redirects).
+		strip := false
+		for _, prev := range via {
+			if !strings.EqualFold(req.URL.Host, prev.URL.Host) {
+				strip = true
+				break
+			}
+			if strings.EqualFold(prev.URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+				strip = true
+				break
+			}
+		}
+		if strip {
 			req.Header.Del("Authorization")
 			req.Header.Del("Ocp-Apim-Subscription-Key")
+			req.Header.Del("Ocp-Apim-Subscription-Region")
 		}
 		return nil
 	},
@@ -76,7 +89,8 @@ func StreamChat(ctx context.Context, cfg config.Config, apiKey string, messages 
 // calls onDelta for every token. It returns when the stream ends, the context
 // is canceled, or the endpoint fails.
 func StreamOpenAI(ctx context.Context, cfg config.Config, p config.Provider, apiKey string, messages []Message, onDelta func(string)) error {
-	if strings.TrimSpace(apiKey) == "" {
+	key := strings.TrimSpace(apiKey)
+	if key == "" && !config.IsLoopbackURL(p.BaseURL) {
 		return &ConfigError{Message: "还没有填写 API Key，请在设置里填写"}
 	}
 	body := map[string]any{
@@ -96,7 +110,9 @@ func StreamOpenAI(ctx context.Context, cfg config.Config, p config.Provider, api
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -121,7 +137,7 @@ func StreamOpenAI(ctx context.Context, cfg config.Config, p config.Provider, api
 		return &HTTPStatusError{Status: resp.StatusCode, Message: msg}
 	}
 
-	contentType := resp.Header.Get("Content-Type")
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	if !strings.Contains(contentType, "event-stream") {
 		// A few gateways ignore stream:true and answer with one JSON body.
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))

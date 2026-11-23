@@ -2,9 +2,9 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
-	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
 	"hayami/internal/config"
@@ -12,8 +12,28 @@ import (
 
 // settingsDirty reports whether the draft differs from the running config.
 func (a *app) settingsDirty() bool {
-	return !a.form.SameConfig(a.cfg) ||
-		a.toolbarEnabled != !a.cfg.DisableSelectionToolbar
+	if !a.form.SameConfig(a.cfg) || a.toolbarEnabled != !a.cfg.DisableSelectionToolbar {
+		return true
+	}
+	if a.formModelParamsSynced {
+		if strings.TrimSpace(a.formTempText) != strconv.FormatFloat(a.cfg.Temperature, 'f', -1, 64) {
+			return true
+		}
+		if strings.TrimSpace(a.formMaxTokensText) != strconv.Itoa(a.cfg.MaxTokens) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *app) discardSettingsDraft() {
+	a.cancelAllProviderProbes()
+	a.form = a.cfg.Clone()
+	a.syncFormModelParams()
+	a.toolbarEnabled = !a.cfg.DisableSelectionToolbar
+	a.providerDeleteArmed = ""
+	a.settingsModesEditing = len(a.form.Modes) > 0
+	a.settingsStatus = "已放弃未保存的修改"
 }
 
 func (a *app) addFormProvider(kind string) {
@@ -60,11 +80,15 @@ func settingRow(c *ui.Context, title, desc string, control func()) {
 func settingsGroup(c *ui.Context, title string, build func()) {
 	t := c.Theme()
 	pal := win11Theme(t)
+	cardRad := float32(10)
+	if isKDE() {
+		cardRad = 6
+	}
 	ui.Column(c).Gap(6).Children(func() {
 		if title != "" {
 			ui.Text(c, title).FontSize(12).Bold().TextColor(pal.TextSecondary).Padding(0, 4)
 		}
-		ui.Column(c).Radius(10).Background(pal.Card).Border(1, pal.Border).
+		ui.Column(c).Radius(cardRad).Background(pal.Card).Border(1, pal.Border).
 			Dividers(1, pal.Border).Children(build)
 	})
 }
@@ -88,55 +112,56 @@ func (a *app) settingsView(c *ui.Context) {
 	t := fluentTheme(c)
 	winW, _ := c.Size()
 	pal := win11Theme(t)
-
-	c.Root().Background(pal.Bg)
+	if !a.formModelParamsSynced && a.form.MaxTokens > 0 {
+		a.syncFormModelParams()
+	}
 
 	status := a.settingsStatus
 	if a.settingsDirty() && (status == "" || status == "已保存") {
 		status = "有未保存的修改"
 	}
 
-	compactSidebar := winW < 640
-	sidebarWidth := float32(200)
-	padContentH := float32(24)
+	compactSidebar := winW < 520
+	sidebarWidth := float32(148)
+	padContentH := float32(20)
 	if compactSidebar {
-		sidebarWidth = 56
+		sidebarWidth = 48
 		padContentH = 12
 	}
-	titleH := float32(40)
+	cardRad := float32(10)
+	navRad := float32(6)
+	if isKDE() {
+		cardRad = 6
+		navRad = 4
+	}
 
-	ui.Column(c).Fill().Children(func() {
-		// Sidebar and content share the title bar band: the window controls
-		// float over the content side, the sidebar starts under it.
-		ui.Row(c).Grow(1).AlignItems(ui.Stretch).Children(func() {
-			ui.Column(c).Width(sidebarWidth).Padding(titleH+8, 10, 10, 10).Gap(2).
+	ui.Column(c).Grow(1).MinHeight(0).Children(func() {
+		ui.Row(c).Grow(1).MinHeight(0).AlignItems(ui.Stretch).Children(func() {
+			// Kirigami / Breeze left navigation column
+			ui.Column(c).Width(sidebarWidth).Padding(10, 8, 10, 8).Gap(3).
 				BorderWidth(0, 1, 0, 0).BorderColor(pal.Border).
-				Background(pal.Surface).Children(func() {
+				Background(pal.Header).Children(func() {
 				navItem := func(idx int, label string, icon *ui.SVG) {
 					on := a.settingsTab == idx
-					rad := float32(7)
-					if isKDE() {
-						rad = 5
-					}
-					btn := ui.ButtonBase(c).Height(32).Radius(rad).
-						AlignItems(ui.Center).Gap(10).Tooltip(label)
+					btn := ui.ButtonBase(c.Key("nav-" + label)).Height(32).Radius(navRad).
+						AlignItems(ui.Center).Gap(10).Tooltip(label).
+						OnClick(func() {
+							a.settingsTab = idx
+							a.settingsScroll.Y = 0
+						})
 					if compactSidebar {
 						btn.Justify(ui.Center).Padding(0)
 					} else {
-						btn.Justify(ui.Start).Padding(6, 10)
+						btn.Justify(ui.Start).Padding(0, 10)
 					}
 					if on {
 						if isKDE() {
-							btn.Background(pal.Accent.Alpha(0.20)).Border(1, pal.Accent.Alpha(0.40))
+							btn.Background(pal.Accent.Alpha(0.18)).Border(1, pal.Accent.Alpha(0.45))
 						} else {
 							btn.Background(pal.Accent)
 						}
 					} else if btn.Hovered() {
 						btn.Background(pal.SurfaceHover)
-					}
-					if btn.Clicked() {
-						a.settingsTab = idx
-						a.settingsScroll.Y = 0
 					}
 					btn.Children(func() {
 						color := pal.TextPrimary
@@ -151,7 +176,10 @@ func (a *app) settingsView(c *ui.Context) {
 							ui.Icon(c, icon).TextColor(color)
 						})
 						if !compactSidebar {
-							ui.Text(c, label).FontSize(13).TextColor(color).SingleLine()
+							txt := ui.Text(c, label).FontSize(13).TextColor(color).SingleLine()
+							if on && isKDE() {
+								txt.Bold()
+							}
 						}
 					})
 				}
@@ -163,61 +191,40 @@ func (a *app) settingsView(c *ui.Context) {
 				navItem(4, "关于", iconAbout)
 			})
 
-			// Content: a draggable section header, then the scrolling page.
-			ui.Column(c).Grow(1).Children(func() {
-				ui.Row(c).Height(titleH).Padding(0, padContentH, 0, padContentH).
-					AlignItems(ui.Center).DragWindow().Children(func() {
+			// Content: section header + scrollable settings body
+			ui.Column(c).Grow(1).MinHeight(0).Children(func() {
+				ui.Row(c).Height(36).Padding(0, padContentH, 0, padContentH).
+					AlignItems(ui.Center).BorderWidth(0, 0, 1, 0).BorderColor(pal.Border).
+					DragWindow().Children(func() {
 					ui.Text(c, settingsSectionTitle(a.settingsTab)).
-						FontSize(15).Bold().TextColor(pal.TextPrimary)
+						FontSize(14).Bold().TextColor(pal.TextPrimary)
 				})
-				ui.Scroll(c).Grow(1).TrackScroll(&a.settingsScroll).Children(func() {
-					ui.Column(c).Padding(4, padContentH, 24, padContentH).Gap(18).Children(func() {
+				ui.Scroll(c).Grow(1).MinHeight(0).TrackScroll(&a.settingsScroll).Children(func() {
+					ui.Column(c).Padding(12, padContentH, 20, padContentH).Gap(16).Children(func() {
 						switch a.settingsTab {
 						case 0:
 							// 常规
 							settingsGroup(c, "行为", func() {
-								settingRow(c, "登录时自动启动", "开机后自动在后台托盘就绪", func() {
-									ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-										txt := "关"
-										if a.openAtLogin {
-											txt = "开"
+								settingRow(c, "登录时自动启动", "开机后静默驻留系统托盘", func() {
+									previous := a.openAtLogin
+									if ui.Switch(c, &a.openAtLogin).Changed() {
+										if err := a.updateOpenAtLogin(a.openAtLogin, setPlatformOpenAtLogin); err != nil {
+											a.openAtLogin = previous
+											a.settingsStatus = "开机启动设置失败：" + err.Error()
+										} else {
+											a.settingsStatus = "开机启动已更新"
 										}
-										ui.Text(c, txt).FontSize(13).TextColor(pal.TextSecondary)
-										previous := a.openAtLogin
-										if ui.Switch(c, &a.openAtLogin).Changed() {
-											if err := a.updateOpenAtLogin(a.openAtLogin, mygo.App.SetOpenAtLogin); err != nil {
-												a.openAtLogin = previous
-												a.settingsStatus = "开机启动设置失败：" + err.Error()
-											} else {
-												a.settingsStatus = "开机启动已更新"
-											}
-										}
-									})
+									}
 								})
 
-								settingRow(c, "选词自动翻译", "选中文字后从任务栏弹出翻译面板", func() {
-									ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-										txt := "关"
-										enabled := !a.form.DisableSelectionToolbar
-										if enabled {
-											txt = "开"
-										}
-										ui.Text(c, txt).FontSize(13).TextColor(pal.TextSecondary)
-										ui.Switch(c, &enabled).OnClick(func() { a.form.DisableSelectionToolbar = !enabled })
-									})
+								settingRow(c, "选词自动翻译", "选中文字后自动弹出翻译面板", func() {
+									enabled := !a.form.DisableSelectionToolbar
+									ui.Switch(c, &enabled).OnClick(func() { a.form.DisableSelectionToolbar = !enabled })
 								})
 
 								settingRow(c, "面板默认固定", "点击其他窗口时保持面板打开", func() {
-									ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-										txt := "关"
-										if a.form.PopupPinned {
-											txt = "开"
-										}
-										ui.Text(c, txt).FontSize(13).TextColor(pal.TextSecondary)
-										ui.Switch(c, &a.form.PopupPinned)
-									})
+									ui.Switch(c, &a.form.PopupPinned)
 								})
-
 							})
 
 							settingsGroup(c, "语言首选项", func() {
@@ -231,39 +238,31 @@ func (a *app) settingsView(c *ui.Context) {
 
 						case 1:
 							// 翻译引擎
-							settingsGroup(c, "默认服务", func() {
-								settingRow(c, "翻译服务", "选择默认使用的在线翻译引擎", func() {
-									activeName := a.providerName
-									if activeName == "" {
-										activeName = "OpenAI Compatible"
-									}
-									ui.Box(c).Padding(4, 10).Radius(6).Background(pal.Surface).Border(1, pal.Border).Children(func() {
-										ui.Text(c, activeName).FontSize(12).TextColor(pal.TextPrimary)
-									})
-								})
-							})
-
-							ui.Row(c).AlignItems(ui.Center).Children(func() {
+							ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 								ui.Text(c, "引擎管理与多引擎对比").FontSize(12).Bold().TextColor(pal.TextSecondary)
+								ui.Badge(c, a.engineLabel()).Background(pal.Accent.Alpha(0.14)).TextColor(pal.Accent)
 								ui.Spacer(c)
-								ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-									ui.Text(c, "多引擎并发").FontSize(11).TextColor(pal.TextSecondary)
-									ui.Switch(c, &a.form.MultiEngine)
-								})
+								ui.Text(c, "多引擎并发").FontSize(12).TextColor(pal.TextSecondary)
+								ui.Switch(c, &a.form.MultiEngine)
 							})
 
 							removeAt, moveFrom, moveTo := -1, -1, -1
 							for i := range a.form.Providers {
 								p := &a.form.Providers[i]
 								armed := a.providerDeleteArmed == p.ID
-								ui.Column(c.Key(p.ID)).Gap(8).Padding(12, 14).Radius(10).
+								ui.Column(c.Key(p.ID)).Gap(8).Padding(12, 14).Radius(cardRad).
 									Background(pal.Card).Border(1, pal.Border).Children(func() {
 									ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 										ui.Switch(c, &p.Enabled)
 										ui.Text(c, providerKindName(p.Kind)).Bold().FontSize(13)
 										ui.Badge(c, fmt.Sprintf("优先级 %d", i+1)).
-											Background(pal.Accent.Alpha(0.12)).TextColor(pal.Accent)
+											Background(pal.Accent.Alpha(0.14)).TextColor(pal.Accent)
 										ui.Spacer(c)
+										probeSt := a.providerProbes[p.ID]
+										testBtn := ui.Button(c, "测试").Tooltip("测试连接与模型可用性").Disabled(probeSt.testing)
+										if testBtn.Clicked() {
+											a.runProviderProbe(*p)
+										}
 										if ui.Button(c, "上移").Tooltip("提高优先级").Disabled(i == 0).Clicked() {
 											moveFrom, moveTo = i, i-1
 											a.providerDeleteArmed = ""
@@ -357,9 +356,25 @@ func (a *app) settingsView(c *ui.Context) {
 									}
 									ui.Field(c, keyLabel, func() {
 										ui.TextInput(c, &p.Key).Password().Placeholder(keyPlaceholder)
-									}).Description("密钥保存在 系统密钥服务，不写入明文配置文件。")
+									}).Description("密钥保存在系统密钥服务，Loopback 本地地址可免填密钥；绝不写入明文配置文件。")
+
+									if probeSt := a.providerProbes[p.ID]; probeSt.testing || probeSt.text != "" {
+										ui.Column(c).Gap(2).Padding(4, 0, 0, 0).Children(func() {
+											color := pal.TextSecondary
+											if !probeSt.testing {
+												if probeSt.ok {
+													color = t.Success
+												} else {
+													color = t.Danger
+												}
+											}
+											ui.Text(c, probeSt.text).FontSize(12).TextColor(color)
+											if probeSt.hint != "" {
+												ui.Text(c, probeSt.hint).FontSize(11).TextColor(pal.TextSecondary)
+											}
+										})
+									}
 								})
-								ui.Box(c).Height(6)
 							}
 
 							if removeAt >= 0 {
@@ -378,6 +393,15 @@ func (a *app) settingsView(c *ui.Context) {
 								if ui.Button(c, "+ 百度翻译").Clicked() {
 									a.addFormProvider(providerBaidu)
 								}
+							})
+
+							settingsGroup(c, "模型参数（OpenAI Compatible）", func() {
+								settingRow(c, "采样温度 (Temperature)", "0 到 2 之间，翻译建议 0.2 – 0.4", func() {
+									ui.TextInput(c, &a.formTempText).Width(120).Placeholder("0.3")
+								})
+								settingRow(c, "最大输出 Token", "单次回复上限，1 到 200000", func() {
+									ui.TextInput(c, &a.formMaxTokensText).Width(120).Placeholder("2048")
+								})
 							})
 
 						case 2:
@@ -406,26 +430,20 @@ func (a *app) settingsView(c *ui.Context) {
 											{config.ThemeLight, "浅色"},
 											{config.ThemeDark, "深色"},
 										} {
-											btn := ui.Button(c.Key("theme-"+opt.value), opt.label)
-											if a.form.Theme == opt.value {
-												btn.Background(pal.Accent).TextColor(ui.RGB(255, 255, 255))
-											}
-											if btn.Clicked() {
-												a.form.Theme = opt.value
-											}
+											val := opt.value
+											segmentedButton(c, "theme-"+val, opt.label, a.form.Theme == val, func() {
+												a.form.Theme = val
+											})
 										}
 									})
 								})
 								settingRow(c, "默认模式", "弹窗顶部可以随时切换", func() {
 									ui.Row(c).Gap(6).Wrap().Children(func() {
 										for _, m := range a.form.AllModes() {
-											btn := ui.Button(c.Key("default-mode-"+m.ID), m.Name)
-											if a.form.ActiveMode == m.ID {
-												btn.Background(pal.Accent).TextColor(ui.RGB(255, 255, 255))
-											}
-											if btn.Clicked() {
-												a.form.ActiveMode = m.ID
-											}
+											id := m.ID
+											segmentedButton(c, "default-mode-"+id, m.Name, a.form.ActiveMode == id, func() {
+												a.form.ActiveMode = id
+											})
 										}
 									})
 								})
@@ -455,8 +473,8 @@ func (a *app) settingsView(c *ui.Context) {
 									ui.Column(c).Gap(10).Padding(12).Children(func() {
 										for i := range a.form.Modes {
 											m := &a.form.Modes[i]
-											ui.Column(c.Key(m.ID)).Gap(6).Padding(12, 14).Radius(8).
-												Background(pal.Surface).Border(1, pal.Border).Children(func() {
+											ui.Column(c.Key(m.ID)).Gap(6).Padding(12, 14).Radius(cardRad).
+												Background(pal.Bg).Border(1, pal.Border).Children(func() {
 												ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 													ui.TextInput(c, &m.Name).Width(150).Placeholder("模式名称")
 													ui.Text(c, m.ID).FontSize(11).TextColor(pal.TextSecondary)
@@ -465,13 +483,13 @@ func (a *app) settingsView(c *ui.Context) {
 														{config.ModeMaterial, "材料"},
 														{config.ModeInstruction, "指令"},
 													} {
-														kindBtn := ui.Button(c.Key("kind-"+m.ID+"-"+kind.value), kind.label)
-														if m.Kind == kind.value {
-															kindBtn.Background(pal.Accent).TextColor(ui.RGB(255, 255, 255))
-														}
-														if kindBtn.Clicked() {
-															m.Kind = kind.value
-														}
+														idx := i
+														kv := kind.value
+														segmentedButton(c, "kind-"+m.ID+"-"+kv, kind.label, m.Kind == kv, func() {
+															if idx < len(a.form.Modes) {
+																a.form.Modes[idx].Kind = kv
+															}
+														})
 													}
 													if ui.Button(c, "删除").Disabled(len(a.form.Modes) == 1).Clicked() {
 														removeMode = i
@@ -516,19 +534,19 @@ func (a *app) settingsView(c *ui.Context) {
 
 						case 4:
 							// 关于
-							ui.Column(c).Radius(10).Background(pal.Card).Border(1, pal.Border).Padding(16).Gap(10).Children(func() {
+							ui.Column(c).Radius(cardRad).Background(pal.Card).Border(1, pal.Border).Padding(16).Gap(10).Children(func() {
 								ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-									ui.Box(c).Width(36).Height(36).Radius(8).Background(pal.Accent).
+									ui.Box(c).Width(36).Height(36).Radius(cardRad).Background(pal.Accent).
 										AlignItems(ui.Center).Justify(ui.Center).Children(func() {
-										ui.Icon(c, iconTranslate).TextColor(ui.RGB(255, 255, 255))
+										ui.Icon(c, iconTranslate).TextColor(pal.AccentText)
 									})
 									ui.Column(c).Children(func() {
-										ui.Text(c, "Hayami Translator 划词翻译").Bold().FontSize(15).TextColor(pal.TextPrimary)
-										ui.Text(c, "轻量托盘划词翻译工具").FontSize(12).TextColor(pal.TextSecondary)
+										ui.Text(c, "Hayami Translator v"+appVersion).Bold().FontSize(15).TextColor(pal.TextPrimary)
+										ui.Text(c, "轻量桌面划词与快捷键翻译工具").FontSize(12).TextColor(pal.TextSecondary)
 									})
 								})
 
-								ui.Text(c, "安全特性：所有 API Key 均存储于 系统密钥服务，配置文件与日志中绝不存储明文敏感信息。").
+								ui.Text(c, "安全特性：所有 API Key 均存储于系统密钥服务，配置文件与日志中绝不存储明文敏感信息。").
 									FontSize(12).TextColor(pal.TextSecondary)
 
 								if dir := userDataDir(); dir != "" {
@@ -542,7 +560,7 @@ func (a *app) settingsView(c *ui.Context) {
 		})
 
 		// Bottom Save & Action Bar
-		ui.Row(c).Height(48).Padding(0, 16).Gap(10).AlignItems(ui.Center).
+		ui.Row(c).Height(46).Padding(0, 16).Gap(8).AlignItems(ui.Center).
 			BorderWidth(1, 0, 0, 0).BorderColor(pal.Border).
 			Background(pal.Footer).Children(func() {
 			if status != "" {
@@ -553,8 +571,9 @@ func (a *app) settingsView(c *ui.Context) {
 				ui.Text(c, a.hotkeyErr).FontSize(12).TextColor(t.Danger).SingleLine().Shrink(1)
 			}
 			ui.Spacer(c)
-			ui.Button(c, "历史记录").OnClick(a.showHistory)
-			ui.Button(c, "关闭").OnClick(a.requestCloseSettings)
+			if a.settingsDirty() {
+				ui.Button(c, "放弃修改").OnClick(a.discardSettingsDraft)
+			}
 			ui.PrimaryButton(c, "保存设置").OnClick(a.saveSettings)
 		})
 	})
@@ -566,6 +585,7 @@ func (a *app) settingsView(c *ui.Context) {
 		"取消", "放弃修改", "保存并关闭") {
 	case 1:
 		a.form = a.cfg.Clone()
+		a.syncFormModelParams()
 		a.toolbarEnabled = !a.cfg.DisableSelectionToolbar
 		a.providerDeleteArmed = ""
 		a.settingsStatus = ""
@@ -582,6 +602,7 @@ func (a *app) settingsView(c *ui.Context) {
 // edits, which the dialog in settingsView then asks about.
 func (a *app) requestCloseSettings() {
 	if !a.settingsDirty() {
+		a.cancelAllProviderProbes()
 		a.hidePopup()
 		return
 	}

@@ -85,8 +85,13 @@ func (a *app) applyReloadedConfig(next Config) {
 	oldToolbar := a.toolbarEnabled
 
 	a.cfg = next
+	setSpeechConfig(next)
+	if a.store != nil && next.HistoryLimit > 0 {
+		_ = a.store.SetMaxEntries(next.HistoryLimit)
+	}
 	if !dirty {
 		a.form = next.Clone()
+		a.syncFormModelParams()
 	}
 	a.providerName = activeProviderLabel(next)
 	a.targetLang = next.TargetLang

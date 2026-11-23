@@ -18,7 +18,10 @@ function Invoke-Step {
     }
 }
 
-$unformatted = & gofmt -l .
+$goFiles = Get-ChildItem -Recurse -Filter *.go | Where-Object {
+    $_.FullName -notmatch '[/\\](references|poc|build|\.mygo|\.git)[/\\]'
+} | ForEach-Object { $_.FullName }
+$unformatted = if ($goFiles) { & gofmt -l @goFiles } else { @() }
 if ($unformatted) {
     Write-Host "FAILED: these files need gofmt:" -ForegroundColor Red
     $unformatted | ForEach-Object { Write-Host "  $_" }

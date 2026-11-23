@@ -9,6 +9,10 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
+func setPlatformOpenAtLogin(enabled bool) error {
+	return mygo.App.SetOpenAtLogin(enabled)
+}
+
 const (
 	runKeyPath      = `Software\Microsoft\Windows\CurrentVersion\Run`
 	approvedKeyPath = `Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`

@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -65,6 +66,8 @@ func TestValidateConfigRanges(t *testing.T) {
 		want string
 	}{
 		{"temperature", func(c *Config) { c.Temperature = 3 }, "temperature"},
+		{"temperature NaN", func(c *Config) { c.Temperature = math.NaN() }, "temperature"},
+		{"temperature Inf", func(c *Config) { c.Temperature = math.Inf(1) }, "temperature"},
 		{"maxTokens", func(c *Config) { c.MaxTokens = 0 }, "maxTokens"},
 		{"triggerMode", func(c *Config) { c.TriggerMode = "别的模式" }, "triggerMode"},
 		{"targetLang", func(c *Config) { c.TargetLang = " " }, "targetLang"},
@@ -183,5 +186,47 @@ func TestSchemaCoversConfigFields(t *testing.T) {
 		if _, ok := schema.Properties[key]; !ok {
 			t.Errorf("Config.%s is missing from config.schema.json", key)
 		}
+	}
+}
+
+func TestFillAndNormalizeDoNotMaskInvalidEnumsOrDuplicateIDs(t *testing.T) {
+	raw := []byte(`{
+		"targetLang": "自动（中→英）",
+		"systemPrompt": "翻译",
+		"hotkey": "Alt+F",
+		"screenshotHotkey": "Alt+S",
+		"inputHotkey": "Alt+D",
+		"providersConfigured": true,
+		"modes": [
+			{"id": "custom", "name": "自定义", "prompt": "处理", "kind": "instruct"}
+		],
+		"providers": [
+			{"id": "dup", "kind": "unknown_kind", "enabled": true},
+			{"id": "dup", "kind": "openai", "enabled": true}
+		]
+	}`)
+	cfg, err := Decode(raw)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+	cfg.FillDefaults()
+	cfg.NormalizeProviders()
+	err = Validate(cfg)
+	if err == nil {
+		t.Fatal("expected Validate to catch invalid mode.kind, provider.kind and duplicate provider.id")
+	}
+	for _, want := range []string{"modes[0].kind", "providers[0].kind", "providers[1].id 与 providers[0] 重复"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Validate error %q missing %q", err.Error(), want)
+		}
+	}
+}
+
+func TestSchemaTargetLangMatchesAutoTarget(t *testing.T) {
+	if !strings.Contains(SchemaJSON, "自动（中→英）") {
+		t.Fatal("SchemaJSON should document the actual auto target value 自动（中→英）")
+	}
+	if strings.Contains(SchemaJSON, "设为 自动检测 时按原文语言") {
+		t.Fatal("SchemaJSON still contains outdated 自动检测 auto-target instruction")
 	}
 }

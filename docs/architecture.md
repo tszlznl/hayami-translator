@@ -8,9 +8,9 @@
 - **界面**：MyGo 原生窗口与控件，自绘 Fluent / 现代化轻量风格界面；Windows 上提供亚克力气泡与浮窗，Linux/Wayland 上提供任务栏抽屉面板；设置、输入、历史与翻译窗口统一共用进程。
 - **模型接入**：`net/http` + 自写 SSE 解析，支持 OpenAI Compatible、Azure 翻译、百度翻译；不依赖厂商 SDK。
 - **系统集成**：
-  - Windows：剪贴板恢复、`SendInput`、全局低级鼠标钩子、SAPI 语音、凭据管理器、注册表自启。
-  - Linux：Wayland PRIMARY 选区（`wl-paste`）、Spectacle 区域截图、XDG Desktop Portal 全局快捷键与托盘边缘吸附面板。
-  - CLI 单实例：支持向后台实例传递 `--selection`、`--input`、`--screenshot`、`--toggle` 指令。
+  - Windows：剪贴板恢复、`SendInput`、全局低级鼠标钩子、SAPI 语音（经 stdin 安全传参并隐藏控制台）、凭据管理器、注册表自启。
+  - Linux：Wayland PRIMARY 选区（`wl-paste --watch` 事件驱动，X11 回退 `xclip`/`xsel`）、多工具区域截图（Spectacle / grim+slurp / gnome-screenshot / Flameshot / xfce4-screenshooter / scrot）、`espeak-ng` 朗读、XDG Autostart 与托盘边缘吸附面板。
+  - CLI 单实例：支持向后台实例传递 `--selection`、`--input`、`--screenshot`、`--settings`、`--toggle`、`--silent` 指令；仅主实例持有单实例锁后才打开 `debug.log`。
 
 ## 二、模块
 
@@ -32,29 +32,30 @@ hayami-translator/
 ├── input_window.go         双栏输入翻译窗口
 ├── settings.go             设置界面
 ├── history_ui.go           历史界面
-├── toolbar.go              划词浮窗与取词气泡开关
-├── icons.go                Fluent 图标与 SAPI 朗读
-├── panel.go                统一面板（翻译、输入、历史、设置）
+├── toolbar.go              划词自动翻译启用开关（原子状态）
+├── icons.go / speech_*.go  Fluent/Breeze 矢量图标与跨平台安全朗读
+├── panel.go                统一面板（翻译、输入、历史、设置）与显示器热插拔同步
 ├── panel_linux.go          Linux 任务栏托盘吸附与 Layer-shell 背景
 ├── panel_other.go          非 Linux 面板位置回退
 ├── selection_windows.go    Windows Ctrl+C 取词与剪贴板恢复
-├── selection_linux.go      Linux Wayland PRIMARY 选区读取与去抖
+├── selection_linux.go      Linux Wayland/X11 PRIMARY 选区读取与去抖
 ├── selection_other.go      非特定平台选区回退
 ├── selection_hook_windows.go Windows 全局低级鼠标钩子
-├── selection_hook_linux.go   Linux 选区变动轮询与防抖
+├── selection_hook_linux.go   Linux Wayland `--watch` 事件监听与 X11 轮询回退
 ├── selection_hook_other.go   非特定平台空钩子
 ├── screenshot_windows.go   Windows 截图集成
-├── screenshot_linux.go     Linux Spectacle 交互选区截图
+├── screenshot_linux.go     Linux 多工具区域截图（Spectacle 等自动回退）
 ├── screenshot_other.go     非特定平台截图回退
 ├── startup_windows.go      Windows 开机自启
-├── startup_other.go        非 Windows 开机自启
+├── startup_linux.go        Linux XDG Autostart 与 KDE 静默元数据补丁
+├── startup_other.go        非 Windows/Linux 开机自启
 ├── ui_helpers.go           设计令牌、面板与通用控件
 ├── internal/config/        配置模型、默认值、读写、校验、Schema
 ├── internal/llm/           OpenAI/Azure/百度协议、SSE、错误分类
 ├── internal/lang/          语种识别与自动目标语言
-├── internal/history/       历史记录 SQLite 存储
+├── internal/history/       线程安全的历史记录 SQLite 存储
 ├── docs/                   架构、决策记录
-├── scripts/check.ps1       本地检查脚本
+├── scripts/                check.ps1 / check.sh 本地检查脚本
 └── resources/              托盘与窗口图标
 ```
 
@@ -76,7 +77,7 @@ hayami-translator/
 - **可信运行参数**：任务、源语言、目标语言、输出格式以 JSON 传给模型，和原文分离。
 - **自动方向**：`lang.EffectiveTarget` 在本机按字符类型判断中英互译，避免把「自动」当成目标语言发给模型。
 - **错误分类**：`llm.ExplainError` 把超时、断网、限流、鉴权、地址/模型不存在、文本过长、TLS、服务端错误映射成可操作提示；面板只展示标题与下一步。
-- **模式**：模式 = 名称 + 提示词 + 语义（材料 / 指令）。内置翻译、润色、总结、解释；`config.json` 的 `modes` 非空时替换内置列表。所有模式共用同一套服务与流式管线，没有按模式分支的请求代码。翻译模式按目标语言输出，其他模式保持原文语言，避免润色中文时被自动目标语言翻成英文。
+- **模式**：模式 = 名称 + 提示词 + 语义（材料 / 指令）。内置翻译、润色、总结、解释；`config.json` 的 `modes` 非空时替换内置列表。翻译模式支持全部已启用服务，非翻译模式和追问自动仅选用 OpenAI Compatible 服务（排除不支持任意提示词的 Azure/百度机器翻译接口）。翻译模式按目标语言输出，其他模式保持原文语言，避免润色中文时被自动目标语言翻成英文。
 - **追问**：结果出来后，弹窗保留原文、上一轮结果与新的追问指令，追加一轮请求；材料合约继续声明第一段文字不是指令。截图与多引擎模式不提供追问。
 - **主题**：`theme` 取 `system`、`light`、`dark`；视图在构建时覆盖 `ui.Theme.Dark`，保存或热加载后重绘所有已打开窗口。
 
@@ -88,25 +89,26 @@ WH_MOUSE_LL（独立线程）
   └► 抬起：拖动 ≥8px 且按住 ≥40ms，或双击（系统双击时间、4px 容差）
        └► 过滤：本程序 / 标题栏 / 终端与列表控件 / Ctrl、Alt、Win 按住
        └► 延迟 140ms 让选区稳定 → 保存剪贴板 → Ctrl+C → 恢复剪贴板
-       └► 气泡：释义卡 + 朗读 / 展开完整翻译
+       └► 在统一翻译面板展示流式结果、朗读、复制与追问
 ```
 
 - 钩子回调只投递事件，不做 I/O；取词在独立 goroutine 完成。每次手势后重新核对前台窗口，避免切窗后把 Ctrl+C 发给别的程序。
 - 双击取词与拖动共用同一条取词链路；单击只记录点击位置，不触发。`HAYAMI_HOOK_DEBUG=1` 时钩子记录手势与拒绝原因，用于排查 Windows 静默摘钩。
+- Linux/Wayland 下使用 `wl-paste --primary --watch` 事件驱动监听 PRIMARY 选区并防抖，空闲时零轮询；X11 下自动回退 `xclip`/`xsel`。
 
 ## 五、配置
 
-`%APPDATA%\Hayami Translator\` 下的文件：
+用户数据目录（Windows 为 `%APPDATA%\Hayami Translator\`，Linux 为 `$XDG_CONFIG_HOME/Hayami Translator/` 或 `~/.config/Hayami Translator/`）下的文件：
 
 ```text
 config.json         全部设置，带 "$schema": "./config.schema.json"
 config.schema.json  每次启动写出，与当前版本一致
 history.db          翻译历史
-debug.log           调试日志（只记录事件，不记录原文与密钥）
+debug.log           调试日志（仅主实例持有单实例锁后打开，0600 权限，不记录原文与密钥）
 ```
 
-- API Key 不在 `config.json`，保存在 Windows 凭据管理器，键名为 `provider.<id>`。
-- **严格解码**：未知字段、类型错误、语法错误分别给出行列或字段路径；校验范围、枚举、重复 ID/快捷键与 URL 语法。
+- API Key 不在 `config.json`，保存在系统密钥服务（Windows 凭据管理器 / Linux Secret Service），键名为 `provider.<id>`。
+- **严格解码**：未知字段、类型错误、语法错误分别给出行列或字段路径；`FillDefaults` 与 `NormalizeProviders` 仅补全缺失字段，不静默覆盖非法枚举或重复 ID，确保 `Validate` 准确报错。
 - **热加载**：`config.json` 被外部修改后由 `mygo.WatchFiles` 监听，重新读取并校验；失败时保留当前配置，成功后在主线程更新界面、托盘与快捷键。设置窗口有未保存草稿时不覆盖草稿。
 - **应用写回**：临时文件 + rename 原子替换；写回前先校验。
 

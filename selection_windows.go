@@ -40,13 +40,21 @@ type keybdInput struct {
 }
 
 // winInput is the Windows INPUT structure for a keyboard event (40 bytes on
-// amd64): a type, four bytes of padding, the union, padded to MOUSEINPUT.
+// 64-bit Windows): a type, four bytes of padding, the union, padded to MOUSEINPUT.
 type winInput struct {
 	typ uint32
 	_   uint32
 	ki  keybdInput
 	_   [8]byte
 }
+
+// Fail compilation immediately if built for a non-64-bit pointer model where
+// the Win32 INPUT union layout differs.
+const (
+	_ = uint(unsafe.Sizeof(winInput{}) - 40)
+	_ = uint(40 - unsafe.Sizeof(winInput{}))
+	_ = uint(unsafe.Sizeof(uintptr(0)) - 8)
+)
 
 var (
 	user32                         = windows.NewLazySystemDLL("user32.dll")
@@ -94,12 +102,16 @@ func sendCtrlC() bool {
 	return true
 }
 
-// readSelectedText copies the selection of the foreground window by sending
-// Ctrl+C and reading the clipboard. The previous clipboard contents are
-// restored afterwards. It detects the copy through the clipboard sequence
-// number, so it never writes a probe that clipboard history would record.
+// readSelectedText reads the foreground window's selection via a two-tier
+// strategy: first querying UI Automation TextPattern.GetSelection (zero key
+// injection, zero clipboard mutation), and falling back to Ctrl+C + lossless
+// clipboard restore only when UIA is unavailable or returns empty text.
 // It must run off the main thread: mygo's clipboard calls marshal to it.
 func readSelectedText() (string, error) {
+	return readSelectedTextTwoTier(readSelectedTextUIA, readClipboardFallback)
+}
+
+func readClipboardFallback() (string, error) {
 	selectionReadMu.Lock()
 	defer selectionReadMu.Unlock()
 	return readSelectedTextWith(saveClipboard, copySelectedText)

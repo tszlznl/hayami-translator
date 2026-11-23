@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -77,7 +78,7 @@ func Validate(c Config) error {
 		problems = append(problems, fmt.Sprintf(format, args...))
 	}
 
-	if c.Temperature < 0 || c.Temperature > 2 {
+	if math.IsNaN(c.Temperature) || math.IsInf(c.Temperature, 0) || c.Temperature < 0 || c.Temperature > 2 {
 		add("temperature 必须在 0 到 2 之间")
 	}
 	if c.MaxTokens <= 0 || c.MaxTokens > 200000 {
@@ -98,6 +99,22 @@ func Validate(c Config) error {
 	case ThemeSystem, ThemeLight, ThemeDark:
 	default:
 		add("theme 只能是 %q、%q 或 %q", ThemeSystem, ThemeLight, ThemeDark)
+	}
+	if c.HistoryLimit < 0 || c.HistoryLimit > 100000 {
+		add("historyLimit 必须在 0 到 100000 之间")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.TTSBackend)) {
+	case "", TTSBackendSystem, TTSBackendPiper, TTSBackendOpenAI:
+	default:
+		add("ttsBackend 只能是 %q、%q 或 %q", TTSBackendSystem, TTSBackendPiper, TTSBackendOpenAI)
+	}
+	switch strings.ToLower(strings.TrimSpace(c.TTSFormat)) {
+	case "", TTSFormatMP3, TTSFormatWAV:
+	default:
+		add("ttsFormat 只能是 %q 或 %q", TTSFormatMP3, TTSFormatWAV)
+	}
+	if endpoint := strings.TrimSpace(c.TTSBaseURL); endpoint != "" && !validHTTPURL(endpoint) {
+		add("ttsBaseURL 不是有效的 http(s) 地址")
 	}
 
 	modes := c.AllModes()
@@ -206,7 +223,7 @@ const SchemaJSON = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://hayami.local/config.schema.json",
   "title": "Hayami Translator 配置",
-  "description": "config.json 的字段说明。API Key 不在本文件中，保存在 Windows 凭据管理器。",
+  "description": "config.json 的字段说明。API Key 不在本文件中，保存在系统密钥服务（Windows 凭据管理器 / Linux Secret Service）。",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -224,7 +241,7 @@ const SchemaJSON = `{
     },
     "targetLang": {
       "type": "string",
-      "description": "目标语言。设为 自动检测 时按原文语言在中英之间互译。"
+      "description": "目标语言。设为 自动（中→英） 时按原文语言在中英之间互译。"
     },
     "sourceLang": {
       "type": "string",
@@ -265,12 +282,12 @@ const SchemaJSON = `{
     "triggerMode": {
       "type": "string",
       "enum": ["显示图标，点击翻译", "取词即译气泡", "直接弹出完整翻译"],
-      "description": "划选文本后的触发方式。"
+      "description": "旧版兼容保留字段（当前统一面板版本不再生效）。"
     },
     "theme": {
       "type": "string",
       "enum": ["system", "light", "dark"],
-      "description": "界面明暗主题；system 跟随 Windows。"
+      "description": "界面明暗主题；system 跟随系统明暗设置。"
     },
     "activeMode": {
       "type": "string",
@@ -315,6 +332,42 @@ const SchemaJSON = `{
     "providersConfigured": {
       "type": "boolean",
       "description": "内部迁移标记，表示 providers 已初始化。"
+    },
+    "historyLimit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000,
+      "description": "历史记录保留上限条数（默认 1000）。"
+    },
+    "ttsBackend": {
+      "type": "string",
+      "enum": ["system", "piper", "openai"],
+      "description": "朗读引擎后端：system（系统默认 TTS）、piper（本地神经语音）或 openai（/v1/audio/speech）。"
+    },
+    "ttsPiperPath": {
+      "type": "string",
+      "description": "Piper 可执行文件路径（留空则在 PATH 中查找 piper）。"
+    },
+    "ttsPiperModel": {
+      "type": "string",
+      "description": "Piper ONNX 语音模型文件路径（.onnx）。"
+    },
+    "ttsBaseURL": {
+      "type": "string",
+      "description": "OpenAI Speech 接口根地址（例如 https://api.openai.com/v1）。"
+    },
+    "ttsModel": {
+      "type": "string",
+      "description": "OpenAI Speech 模型名（默认 tts-1）。"
+    },
+    "ttsVoice": {
+      "type": "string",
+      "description": "OpenAI Speech 音色名称（默认 alloy）。"
+    },
+    "ttsFormat": {
+      "type": "string",
+      "enum": ["mp3", "wav"],
+      "description": "OpenAI Speech 音频输出格式（mp3 或 wav）。"
     },
     "providers": {
       "type": "array",
